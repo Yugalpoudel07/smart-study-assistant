@@ -1,8 +1,14 @@
+import sys
+import os
+
+# Add project root (smart-study-assistant) to path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.services.nlp_service import analyze_text
+from services.nlp_service import analyze_text
 
 app = FastAPI()
 

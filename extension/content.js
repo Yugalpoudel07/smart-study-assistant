@@ -7,20 +7,18 @@ async function sendTextToBackend(text) {
     body: JSON.stringify({ text: text })
   });
 
-  const data = await response.json();
-  return data;
+  return await response.json();
 }
 
 document.addEventListener("mouseup", async () => {
   let selectedText = window.getSelection().toString().trim();
 
-  if (selectedText.length > 0) {
+  if (selectedText.length > 20) { // avoid small clicks
     const result = await sendTextToBackend(selectedText);
 
-    console.log("Simplified:", result.simplified);
-    console.log("Questions:", result.questions);
-    console.log("Keywords:", result.keywords);
-
-    chrome.storage.local.set({ analysis: result });
+    chrome.storage.local.set({
+      analysis: result,
+      selectedText: selectedText
+    });
   }
 });

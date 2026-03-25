@@ -1,7 +1,7 @@
-from nlp_engine.preprocessing.cleaner import clean_text
+from nlp_engine.preprocessing.preprocess import clean_text
 from nlp_engine.simplification.simplify import simplify_text
-from nlp_engine.question_generation.qg import generate_questions
-from nlp_engine.keyword_extraction.keywords import extract_keywords
+from nlp_engine.question_generation.generate_questions import generate_questions
+from nlp_engine.keyword_extraction.extract_keywords import extract_keywords
 
 cache = {}
 
@@ -11,20 +11,9 @@ def analyze_text(text: str):
 
     cleaned = clean_text(text)
 
-    try:
-        simplified = simplify_text(cleaned)
-    except Exception:
-        simplified = "Error simplifying text"
-
-    try:
-        questions = generate_questions(cleaned)
-    except Exception:
-        questions = ["Error generating questions"]
-
-    try:
-        keywords = extract_keywords(cleaned)
-    except Exception:
-        keywords = ["Error extracting keywords"]
+    simplified = simplify_text(cleaned)
+    questions = generate_questions(cleaned)
+    keywords = extract_keywords(cleaned)
 
     result = {
         "simplified": simplified,
