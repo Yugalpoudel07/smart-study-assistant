@@ -1,7 +1,5 @@
 import sys
 import os
-
-# Add project root (smart-study-assistant) to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from fastapi import FastAPI
@@ -12,7 +10,6 @@ from services.nlp_service import analyze_text
 
 app = FastAPI()
 
-# ✅ VERY IMPORTANT (for extension to call API)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,5 +23,4 @@ class TextRequest(BaseModel):
 
 @app.post("/analyze")
 def analyze(request: TextRequest):
-    result = analyze_text(request.text)
-    return result
+    return analyze_text(request.text)

@@ -1,13 +1,31 @@
 body {
-  font-family: Arial;
+  font-family: "Times New Roman", Times, serif;
   padding: 10px;
-  width: 300px;
+  width: 350px;          /* Slightly wider for readability */
+  background-color: #f9f9f9;
+  color: #111;
+}
+
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 h3 {
-  margin-top: 10px;
+  font-size: 16px;
+  margin-bottom: 4px;
+  color: #333;
 }
 
-pre {
+.output-text {
+  font-size: 14px;
+  line-height: 1.4;
+  background-color: #fff;
+  padding: 6px 8px;
+  border-radius: 5px;
+  border: 1px solid #ccc;
+  max-height: 150px;
+  overflow-y: auto;   /* Scroll if text is long */
   white-space: pre-wrap;
 }
