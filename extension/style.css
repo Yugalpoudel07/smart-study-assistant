@@ -1,31 +1,72 @@
 body {
-  font-family: "Times New Roman", Times, serif;
+  font-family: 'Segoe UI', Arial, sans-serif;
+  margin: 0;
   padding: 10px;
-  width: 350px;          /* Slightly wider for readability */
-  background-color: #f9f9f9;
-  color: #111;
+  width: 360px;
+  background: #f4f6f8;
 }
 
 .container {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
+/* Header */
+h2 {
+  font-size: 18px;
+  text-align: center;
+  margin-bottom: 5px;
+  color: #2c3e50;
+}
+
+/* Card UI */
+.card {
+  background: white;
+  padding: 10px;
+  border-radius: 10px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+}
+
+/* Section titles */
 h3 {
-  font-size: 16px;
-  margin-bottom: 4px;
-  color: #333;
+  margin: 0 0 6px 0;
+  font-size: 14px;
+  color: #555;
 }
 
+/* Output text */
 .output-text {
-  font-size: 14px;
-  line-height: 1.4;
-  background-color: #fff;
-  padding: 6px 8px;
-  border-radius: 5px;
-  border: 1px solid #ccc;
-  max-height: 150px;
-  overflow-y: auto;   /* Scroll if text is long */
-  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.5;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+/* Questions list */
+ul {
+  padding-left: 18px;
+  margin: 0;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+li {
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+/* Keywords as tags */
+.keywords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tag {
+  background: #e3f2fd;
+  color: #1976d2;
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-size: 12px;
 }

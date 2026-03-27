@@ -1,19 +1,30 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Study Assistant</title>
+  <title>Smart Study Assistant</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <h3>Simplified</h3>
-<p id="simplified"></p>
 
-<h3>Questions</h3>
-<pre id="questions"></pre>
+<div class="container">
+  <h2>Smart Study Assistant</h2>
 
-<h3>Keywords</h3>
-<p id="keywords"></p>
+  <div class="card">
+    <h3>Simplified</h3>
+    <p id="simplified" class="output-text">Loading...</p>
+  </div>
 
-  <script src="popup.js"></script>
+  <div class="card">
+    <h3>Questions</h3>
+    <ul id="questions"></ul>
+  </div>
+
+  <div class="card">
+    <h3>Keywords</h3>
+    <div id="keywords" class="keywords"></div>
+  </div>
+</div>
+
+<script src="popup.js"></script>
 </body>
 </html>
