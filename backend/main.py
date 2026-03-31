@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
-from services.nlp_service import analyze_text, get_history, export_to_pdf, save_history
+from backend.services.nlp_service import analyze_text, get_history, export_to_pdf, save_history
 
 import json
 import os
