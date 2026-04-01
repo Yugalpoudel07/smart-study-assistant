@@ -1,141 +1,120 @@
-import torch
-from transformers import pipeline
-import spacy
-import nltk
-from nltk.tokenize import sent_tokenize
+import os
 import re
 import json
 from fpdf import FPDF
-import os
+import anthropic
 
+# Initialize Claude client
+# Set your ANTHROPIC_API_KEY environment variable on Render
+client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
-nltk.download('punkt')
-nltk.download('punkt_tab')
-
-nlp = spacy.load("en_core_web_sm")
-
-print("Loading models...")
-generator = pipeline("text2text-generation", model="google/flan-t5-base")
-print("Models loaded!")
+MODEL = "claude-haiku-4-5-20251001"  # Fast + cheap — ideal for this use case
 
 # -------------------------------
-# 1. SIMPLIFICATION (sentence by sentence)
+# 1. SIMPLIFICATION
 # -------------------------------
 def simplify_text(text):
-    sentences = sent_tokenize(text)
-    simplified_sentences = []
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=1024,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "Simplify the following text so a high school student can understand it easily. "
+                    "Keep the meaning intact. Return only the simplified text, no preamble.\n\n"
+                    f"{text}"
+                )
+            }
+        ]
+    )
+    return message.content[0].text.strip()
 
-    for sent in sentences:
-        prompt = f"Simplify this text for a student: {sent}"
-
-        result = generator(
-            prompt,
-            max_new_tokens=250,
-            num_beams=4,
-            do_sample=False,
-            early_stopping=True
-        )
-
-        simplified = result[0]['generated_text'].strip()
-
-        # fallback if output is too short or echoing
-        if not simplified or len(simplified) < 10:
-            simplified = _fallback_simplify(sent)
-
-        original_words = set(sent.lower().split())
-        output_words = set(simplified.lower().split())
-        overlap = len(original_words & output_words) / max(len(original_words), 1)
-
-        if overlap > 0.85:
-            simplified = _fallback_simplify(sent)
-
-        simplified_sentences.append(simplified)
-
-    return " ".join(simplified_sentences)
-
-
-def _fallback_simplify(text):
-    """Rule-based simplification when model fails."""
-    doc = nlp(text)
-    simple_sentences = []
-
-    for sent in doc.sents:
-        sentence = sent.text.strip()
-        parts = re.split(
-            r'\b(however|therefore|furthermore|consequently|nevertheless)\b',
-            sentence,
-            flags=re.IGNORECASE
-        )
-        for part in parts:
-            part = part.strip()
-            if len(part.split()) > 5 and part.lower() not in [
-                'however', 'therefore', 'furthermore', 'consequently', 'nevertheless'
-            ]:
-                simple_sentences.append(part)
-
-    return " ".join(simple_sentences) if simple_sentences else text
 
 # -------------------------------
-# 2. QUESTION GENERATION (sentence by sentence)
+# 2. QUESTION GENERATION
 # -------------------------------
 def generate_questions(text):
-    sentences = sent_tokenize(text)
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=512,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "Generate up to 5 study questions based on the following text. "
+                    "Return them as a numbered list, one per line, ending each with a question mark. "
+                    "No preamble, just the questions.\n\n"
+                    f"{text}"
+                )
+            }
+        ]
+    )
+    raw = message.content[0].text.strip()
+    lines = raw.split("\n")
     questions = []
-
-    for sent in sentences:
-        prompt = f"Generate questions based on this text: {sent}"
-
-        result = generator(
-            prompt,
-            max_new_tokens=200,
-            num_beams=4,
-            do_sample=False,
-            early_stopping=True
-        )
-
-        raw_output = result[0]['generated_text']
-        lines = re.split(r'\n|\?', raw_output)
-
-        for line in lines:
-            q = line.strip()
-            if len(q) > 10:
-                if not q.endswith("?"):
-                    q += "?"
-                questions.append(q)
-
-    # remove duplicates and limit
-    questions = list(dict.fromkeys(questions))
+    for line in lines:
+        # Strip leading numbers like "1. " or "1) "
+        q = re.sub(r"^\d+[\.\)]\s*", "", line).strip()
+        if len(q) > 10:
+            if not q.endswith("?"):
+                q += "?"
+            questions.append(q)
     return questions[:5] if questions else ["Could not generate questions. Try a longer paragraph."]
+
 
 # -------------------------------
 # 3. KEYWORD EXTRACTION
 # -------------------------------
 def extract_keywords(text):
-    doc = nlp(text)
-    keywords = set()
-    for token in doc:
-        if token.pos_ in ["NOUN", "PROPN"] and not token.is_stop and len(token.text) > 2:
-            keywords.add(token.text.lower())
-    return list(keywords)
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=256,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "Extract the 8 to 12 most important keywords or key phrases from the following text. "
+                    "Return them as a comma-separated list on a single line. No preamble.\n\n"
+                    f"{text}"
+                )
+            }
+        ]
+    )
+    raw = message.content[0].text.strip()
+    keywords = [kw.strip().lower() for kw in raw.split(",") if kw.strip()]
+    return keywords[:12]
+
 
 # -------------------------------
 # 4. DIFFICULTY DETECTION
 # -------------------------------
 def detect_difficulty(text):
-    sentences = sent_tokenize(text)
-    total_words = sum(len(s.split()) for s in sentences)
-    avg_words = total_words / max(len(sentences), 1)
-    if avg_words < 12:
-        return "Easy"
-    elif avg_words < 20:
-        return "Medium"
-    else:
-        return "Hard"
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=16,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "Rate the reading difficulty of the following text. "
+                    "Reply with exactly one word: Easy, Medium, or Hard.\n\n"
+                    f"{text}"
+                )
+            }
+        ]
+    )
+    raw = message.content[0].text.strip()
+    # Normalize to one of the three levels
+    for level in ["Easy", "Medium", "Hard"]:
+        if level.lower() in raw.lower():
+            return level
+    return "Medium"  # safe fallback
+
 
 # -------------------------------
 # 5. EXPORT TO PDF
 # -------------------------------
-
 def export_to_pdf(data, filename="output.pdf"):
     pdf = FPDF()
     pdf.add_page()
@@ -143,7 +122,7 @@ def export_to_pdf(data, filename="output.pdf"):
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_font("Arial", size=12)
 
-    page_width = pdf.w - 30  # subtract left + right margins
+    page_width = pdf.w - 30
 
     def sanitize(text, max_word=40):
         text = re.sub(
@@ -168,17 +147,14 @@ def export_to_pdf(data, filename="output.pdf"):
             pass
         pdf.ln(2)
 
-    # Title
     pdf.set_font("Arial", style='B', size=14)
     pdf.cell(page_width, 12, "Smart Study Assistant Output", ln=True, align='C')
     pdf.ln(4)
 
-    # 1. Simplified Text
     write_heading("Simplified Text:")
     write_body(data.get("simplified", ""))
     pdf.ln(2)
 
-    # 2. Questions
     write_heading("Questions:")
     for q in data.get("questions", []):
         q = q.strip()
@@ -186,13 +162,11 @@ def export_to_pdf(data, filename="output.pdf"):
             write_body(f"- {q}")
     pdf.ln(2)
 
-    # 3. Keywords
     write_heading("Keywords:")
     keywords_text = ", ".join(data.get("keywords", []))
     write_body(keywords_text)
     pdf.ln(2)
 
-    # 4. Difficulty
     write_heading("Difficulty Level:")
     write_body(data.get("difficulty", ""))
 
@@ -211,7 +185,7 @@ def save_history(entry):
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
             try:
                 history = json.load(f)
-            except:
+            except Exception:
                 history = []
     history.append(entry)
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
@@ -222,9 +196,10 @@ def get_history():
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
             try:
                 return json.load(f)
-            except:
+            except Exception:
                 return []
     return []
+
 
 # -------------------------------
 # 7. MAIN NLP SERVICE
