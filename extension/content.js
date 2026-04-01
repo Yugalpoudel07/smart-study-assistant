@@ -250,7 +250,7 @@ function createPanel() {
     if (!analysis) { alert("No analysis data to export."); return; }
 
     try {
-      const resp = await fetch("http://127.0.0.1:8000/export-pdf", {
+      const resp = await fetch("https://smart-study-assistant-backend.onrender.com/export-pdf", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -290,7 +290,7 @@ function createPanel() {
 
 async function deleteHistoryItem(index) {
   try {
-    await fetch(`http://127.0.0.1:8000/history/${index}`, { method: "DELETE" });
+    await fetch(`https://smart-study-assistant-backend.onrender.com/history/${index}`, { method: "DELETE" });
     loadHistory();
   } catch (err) {
     alert("Could not delete. Is the backend running?");
@@ -302,7 +302,7 @@ async function loadHistory() {
   const container = p.querySelector("#ssa-history");
   container.innerHTML = '<div class="ssa-loading">Loading history</div>';
   try {
-    const resp = await fetch("http://127.0.0.1:8000/history");
+    const resp = await fetch("https://smart-study-assistant-backend.onrender.com/history");
     const items = await resp.json();
     historyCache = items;
     if (!items.length) {
@@ -414,7 +414,7 @@ function showResults(result) {
 }
 
 async function sendTextToBackend(text) {
-  const response = await fetch("http://127.0.0.1:8000/analyze", {
+  const response = await fetch("https://smart-study-assistant-backend.onrender.com/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text })
