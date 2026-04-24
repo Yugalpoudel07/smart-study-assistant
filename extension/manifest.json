@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Smart Study Assistant",
-  "version": "1.0",
-  "description": "AI-powered study helper — simplify text, generate questions, extract keywords, detect difficulty, history & PDF export",
+  "version": "2.0",
+  "description": "AI-powered study helper: simplify text, generate questions, extract keywords, detect difficulty. Toggle AI analysis on/off. Requires local backend.",
 
   "permissions": ["activeTab", "scripting", "storage"],
 
@@ -11,7 +11,7 @@
       "48": "icon.png",
       "128": "icon.png"
     },
-    "default_title": "Smart Study Assistant"
+    "default_title": "Smart Study Assistant — Click to open panel"
   },
 
   "background": {
