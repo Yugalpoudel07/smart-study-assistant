@@ -39,8 +39,6 @@
     "128": "icon.png"
   },
 
-  "minimum_chrome_version": "102",
-
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'none';"
   }
