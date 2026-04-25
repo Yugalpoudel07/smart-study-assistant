@@ -1,70 +1,65 @@
 """
-nlp_service.py — Orchestrator: wires models into sub-modules and exposes
-                 the single public entry point `analyze_text()`.
-
-Sub-modules:
-    model_loader       — spaCy + Flan-T5 singleton
-    simplifier         — sentence-by-sentence simplification
-    question_generator — practice question generation
-    keyword_extractor  — noun/proper-noun extraction
-    difficulty_detector— Easy / Medium / Hard classification
-    pdf_exporter       — FPDF2-based PDF generation
-    history_manager    — JSON-backed history CRUD
+nlp_service.py — Uses Claude API (claude-sonnet-4-20250514) instead of local
+                 spaCy + Flan-T5 models. Runs on ~50 MB RAM — Render-friendly.
 """
 
-import nltk
+import os
+import json
+import re
+import anthropic
 
-nltk.download("punkt", quiet=True)
-nltk.download("punkt_tab", quiet=True)
+from services import history_manager
 
-from services.model_loader import get_models
-from services import (
-    simplifier,
-    question_generator,
-    keyword_extractor,
-    difficulty_detector,
-    pdf_exporter,
-    history_manager,
-)
+# ── Client — key comes from environment variable, never hardcoded ─────────────
+_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-# ── Bootstrap: inject models into modules that need them ─────────────────────
-_nlp, _generator = get_models()
-simplifier.init(_nlp, _generator)
-question_generator.init(_generator)
-keyword_extractor.init(_nlp)
-# difficulty_detector and pdf_exporter are stateless — no init needed
+SYSTEM_PROMPT = """You are an AI study assistant. When given a passage of text,
+you respond ONLY with a valid JSON object — no markdown, no explanation, no extra text.
 
-# ── Public re-exports (so main.py import surface doesn't change) ─────────────
-export_to_pdf = pdf_exporter.export_to_pdf
-get_history = history_manager.get_history
-save_history = history_manager.save_history
-delete_history_item = history_manager.delete_history_item
+The JSON must have exactly these keys:
+{
+  "simplified": "<the text rewritten in plain simple language a student can understand>",
+  "questions": ["<question 1>", "<question 2>", "<question 3>", "<question 4>", "<question 5>"],
+  "keywords": ["<keyword1>", "<keyword2>", ...],
+  "difficulty": "<Easy|Medium|Hard>"
+}
+
+Rules:
+- simplified: rewrite in clear, short sentences. Keep all key facts.
+- questions: exactly 5 practice questions covering the main ideas.
+- keywords: 5–15 important nouns or concepts from the text, lowercase, sorted.
+- difficulty: Easy (< 12 avg words/sentence), Medium (12–19), Hard (20+).
+- Output ONLY the JSON. Any other output breaks the parser."""
 
 
-# ── Main analysis entry point ─────────────────────────────────────────────────
 def analyze_text(text: str) -> dict:
-    """
-    Run all NLP tasks on *text* and persist the result to history.
+    """Send text to Claude API and return structured analysis."""
+    message = _client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1024,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": f"Analyze this text:\n\n{text}"}],
+    )
 
-    Returns:
-        {
-            "simplified": str,
-            "questions":  list[str],
-            "keywords":   list[str],
-            "difficulty": str,
-        }
-    """
-    simplified = simplifier.simplify_text(text)
-    questions = question_generator.generate_questions(text)
-    keywords = keyword_extractor.extract_keywords(text)
-    difficulty = difficulty_detector.detect_difficulty(text)
+    raw = message.content[0].text.strip()
 
-    result = {
-        "simplified": simplified,
-        "questions": questions,
-        "keywords": keywords,
-        "difficulty": difficulty,
-    }
+    # Strip accidental markdown fences if model adds them
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+
+    result = json.loads(raw)
+
+    # Validate / normalise keys so downstream code never breaks
+    result.setdefault("simplified", "")
+    result.setdefault("questions", [])
+    result.setdefault("keywords", [])
+    result.setdefault("difficulty", "Medium")
 
     history_manager.save_history({"input": text, **result})
     return result
+
+
+# ── Re-exports so main.py import surface stays unchanged ──────────────────────
+get_history = history_manager.get_history
+save_history = history_manager.save_history
+delete_history_item = history_manager.delete_history_item

@@ -1,18 +1,16 @@
-# FastAPI for backend
+# Smart Study Assistant — Render-optimised requirements
+# Total install size: ~80 MB (vs ~4 GB with local models)
+
+# Web framework
 fastapi==0.116.1
 uvicorn==0.35.0
 pydantic==2.10.6
 
-# NLP and Transformers
-transformers==4.57.6
-torch==2.9.1
-spacy==3.8.13
-nltk==3.9.1
-en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+# Anthropic Claude API — replaces spaCy + Flan-T5 entirely
+anthropic==0.57.0
 
 # PDF generation
-fpdf2
-reportlab==4.0.0
+fpdf2==2.8.3
 
-# Optional utilities
-python-multipart==0.0.6   # if you add file uploads later
+# File upload support (if needed later)
+python-multipart==0.0.6

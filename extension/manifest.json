@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Smart Study Assistant",
-  "version": "2.0",
-  "description": "AI-powered study helper: simplify text, generate questions, extract keywords, detect difficulty. Toggle AI analysis on/off. Requires local backend.",
+  "version": "3.0",
+  "description": "AI-powered study helper: simplify text, generate questions, extract keywords, detect difficulty. Toggle AI analysis on/off.",
 
   "permissions": ["activeTab", "scripting", "storage"],
 
@@ -27,6 +27,7 @@
   ],
 
   "host_permissions": [
+    "https://*.onrender.com/*",
     "http://127.0.0.1:8000/*"
   ],
 

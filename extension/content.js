@@ -5,7 +5,9 @@
 "use strict";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-const API_BASE         = "http://127.0.0.1:8000";
+// ⚠️  Set this to your Render URL after deploying, e.g.:
+// const API_BASE = "https://smart-study-assistant-api.onrender.com";
+const API_BASE = "https://YOUR-APP-NAME.onrender.com";
 const FETCH_TIMEOUT_MS = 30000; // 30 s — model inference can be slow
 
 // ─── Module state ────────────────────────────────────────────────────────────

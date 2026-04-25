@@ -1,13 +1,9 @@
 """
-main.py — FastAPI server for Smart Study Assistant.
-
-Endpoints:
-    POST   /analyze          → run all NLP tasks
-    GET    /history          → list all past analyses
-    DELETE /history/{index}  → remove one history entry
-    POST   /export-pdf       → stream a PDF download
+main.py — FastAPI server for Smart Study Assistant (Claude API backend).
+Designed to run on Render free tier (~512 MB RAM).
 """
 
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -18,11 +14,12 @@ from services.nlp_service import (
     analyze_text,
     get_history,
     delete_history_item,
-    export_to_pdf,
 )
+from services.pdf_exporter import export_to_pdf
 
-app = FastAPI(title="Smart Study Assistant API", version="2.0")
+app = FastAPI(title="Smart Study Assistant API", version="4.0")
 
+# ── CORS — allow the extension (chrome-extension://) and any origin ───────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,7 +29,7 @@ app.add_middleware(
 )
 
 
-# ── Request / Response models ─────────────────────────────────────────────────
+# ── Request models ────────────────────────────────────────────────────────────
 
 class TextRequest(BaseModel):
     text: str
@@ -47,9 +44,20 @@ class ExportRequest(BaseModel):
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
+@app.get("/health")
+def health():
+    """Render health check — keeps the service alive."""
+    return {"status": "ok", "version": "4.0"}
+
+
 @app.post("/analyze")
 def analyze(req: TextRequest):
-    return analyze_text(req.text)
+    if not req.text or len(req.text.strip()) < 10:
+        raise HTTPException(status_code=400, detail="Text too short (min 10 chars)")
+    try:
+        return analyze_text(req.text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/history")
@@ -73,9 +81,12 @@ def export_pdf(req: ExportRequest):
         "keywords": req.keywords,
         "difficulty": req.difficulty,
     }
-    filename = export_to_pdf(data)
-    return StreamingResponse(
-        open(filename, "rb"),
-        media_type="application/pdf",
-        headers={"Content-Disposition": "attachment; filename=study_output.pdf"},
-    )
+    try:
+        filename = export_to_pdf(data)
+        return StreamingResponse(
+            open(filename, "rb"),
+            media_type="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=study_output.pdf"},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
