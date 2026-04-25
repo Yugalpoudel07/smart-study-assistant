@@ -1,17 +1,25 @@
 {
   "manifest_version": 3,
   "name": "Smart Study Assistant",
-  "version": "3.0",
-  "description": "AI-powered study helper: simplify text, generate questions, extract keywords, detect difficulty. Toggle AI analysis on/off.",
+  "version": "3.1",
+  "description": "Select any text on a webpage to get an AI-powered simplified explanation, practice questions, keywords, and difficulty rating.",
 
-  "permissions": ["activeTab", "scripting", "storage"],
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+
+  "host_permissions": [
+    "https://smart-study-assistant-api.onrender.com/*"
+  ],
 
   "action": {
     "default_icon": {
       "48": "icon.png",
       "128": "icon.png"
     },
-    "default_title": "Smart Study Assistant — Click to open panel"
+    "default_title": "Smart Study Assistant"
   },
 
   "background": {
@@ -20,15 +28,10 @@
 
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": ["https://*/*", "http://*/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }
-  ],
-
-  "host_permissions": [
-    "https://*.onrender.com/*",
-    "http://127.0.0.1:8000/*"
   ],
 
   "icons": {
@@ -36,5 +39,9 @@
     "128": "icon.png"
   },
 
-  "minimum_chrome_version": "102"
+  "minimum_chrome_version": "102",
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none';"
+  }
 }
