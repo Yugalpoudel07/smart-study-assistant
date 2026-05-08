@@ -1,18 +1,45 @@
-# FastAPI for backend
+# =========================================================
+# Backend Framework
+# =========================================================
 fastapi==0.116.1
-uvicorn==0.35.0
+uvicorn[standard]==0.35.0
 pydantic==2.10.6
+python-multipart==0.0.6
 
-# NLP and Transformers
+# =========================================================
+# NLP / AI
+# =========================================================
 transformers==4.57.6
 torch==2.9.1
+sentencepiece==0.2.0
+accelerate==1.10.1
+
+# =========================================================
+# spaCy + NLP Utilities
+# =========================================================
 spacy==3.8.13
 nltk==3.9.1
+
+# spaCy English model
 en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 
-# PDF generation
-fpdf2
+# =========================================================
+# PDF Generation
+# =========================================================
+fpdf2==2.8.3
 reportlab==4.0.0
 
-# Optional utilities
-python-multipart==0.0.6   # if you add file uploads later
+# =========================================================
+# Optional Performance Utilities
+# =========================================================
+protobuf>=4.25.3
+safetensors>=0.4.3
+numpy>=1.26.4
+
+# =========================================================
+# Compatibility Fixes
+# =========================================================
+regex>=2024.5.15
+tqdm>=4.67.1
+requests>=2.32.3
+packaging>=24.1

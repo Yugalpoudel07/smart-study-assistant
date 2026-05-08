@@ -273,42 +273,6 @@ marimo/_lsp/
 __marimo__/
 </file>
 
-<file path="backend/services/__init__.py">
-
-</file>
-
-<file path="backend/services/difficulty_detector.py">
-"""
-difficulty_detector.py — Text difficulty classification based on sentence complexity.
-"""
-
-from nltk.tokenize import sent_tokenize
-
-
-def detect_difficulty(text: str) -> str:
-    """
-    Classify text as Easy / Medium / Hard based on average words per sentence.
-
-    Thresholds:
-        < 12 words/sentence  → Easy
-        12–19 words/sentence → Medium
-        20+ words/sentence   → Hard
-    """
-    sentences = sent_tokenize(text)
-    if not sentences:
-        return "Easy"
-
-    total_words = sum(len(s.split()) for s in sentences)
-    avg_words = total_words / len(sentences)
-
-    if avg_words < 12:
-        return "Easy"
-    elif avg_words < 20:
-        return "Medium"
-    else:
-        return "Hard"
-</file>
-
 <file path="backend/services/history_manager.py">
 """
 history_manager.py — Persistent analysis history backed by a local JSON file.
@@ -359,6 +323,148 @@ def delete_history_item(index: int) -> bool:
         _save(history)
         return True
     return False
+</file>
+
+<file path="backend/services/pdf_exporter.py">
+"""
+pdf_exporter.py — PDF generation for study analysis results using FPDF2.
+"""
+
+import re
+from fpdf import FPDF
+
+
+def export_to_pdf(data: dict, filename: str = "output.pdf") -> str:
+    """
+    Generate a formatted PDF from analysis data.
+
+    Args:
+        data: dict with keys: simplified, questions, keywords, difficulty
+        filename: output file path
+
+    Returns:
+        The filename that was written.
+    """
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_margins(15, 15, 15)
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    page_width = pdf.w - 30  # left + right margins
+
+    def sanitize(text: str, max_word: int = 40) -> str:
+        """Break long unbreakable words and ensure latin-1 compatibility."""
+        text = re.sub(
+            r"(\S{" + str(max_word) + r",})",
+            lambda m: " ".join(
+                m.group(0)[i : i + max_word]
+                for i in range(0, len(m.group(0)), max_word)
+            ),
+            text,
+        )
+        return text.encode("latin-1", errors="replace").decode("latin-1")
+
+    def write_heading(title: str):
+        pdf.set_font("Arial", style="B", size=12)
+        pdf.cell(page_width, 10, sanitize(title), ln=True, align="L")
+        pdf.set_font("Arial", size=12)
+
+    def write_body(text: str):
+        try:
+            pdf.multi_cell(page_width, 8, sanitize(text), align="L")
+        except Exception:
+            pass
+        pdf.ln(2)
+
+    # ── Title ─────────────────────────────────────────────
+    pdf.set_font("Arial", style="B", size=14)
+    pdf.cell(page_width, 12, "Smart Study Assistant Output", ln=True, align="C")
+    pdf.ln(4)
+
+    # ── Simplified Text ───────────────────────────────────
+    write_heading("Simplified Text:")
+    write_body(data.get("simplified", ""))
+    pdf.ln(2)
+
+    # ── Questions ─────────────────────────────────────────
+    write_heading("Questions:")
+    for q in data.get("questions", []):
+        q = q.strip()
+        if q:
+            write_body(f"- {q}")
+    pdf.ln(2)
+
+    # ── Keywords ──────────────────────────────────────────
+    write_heading("Keywords:")
+    write_body(", ".join(data.get("keywords", [])))
+    pdf.ln(2)
+
+    # ── Difficulty ────────────────────────────────────────
+    write_heading("Difficulty Level:")
+    write_body(data.get("difficulty", ""))
+
+    pdf.output(filename)
+    return filename
+</file>
+
+<file path="LICENSE">
+MIT License
+
+Copyright (c) 2026 Yugal Poudel
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+</file>
+
+<file path="backend/services/__init__.py">
+
+</file>
+
+<file path="backend/services/difficulty_detector.py">
+"""
+difficulty_detector.py — Text difficulty classification based on sentence complexity.
+"""
+
+from nltk.tokenize import sent_tokenize
+
+
+def detect_difficulty(text: str) -> str:
+    """
+    Classify text as Easy / Medium / Hard based on average words per sentence.
+
+    Thresholds:
+        < 12 words/sentence  → Easy
+        12–19 words/sentence → Medium
+        20+ words/sentence   → Hard
+    """
+    sentences = sent_tokenize(text)
+    if not sentences:
+        return "Easy"
+
+    total_words = sum(len(s.split()) for s in sentences)
+    avg_words = total_words / len(sentences)
+
+    if avg_words < 12:
+        return "Easy"
+    elif avg_words < 20:
+        return "Medium"
+    else:
+        return "Hard"
 </file>
 
 <file path="backend/services/keyword_extractor.py">
@@ -595,88 +701,6 @@ def get_models():
     return _nlp, _generator
 </file>
 
-<file path="backend/services/pdf_exporter.py">
-"""
-pdf_exporter.py — PDF generation for study analysis results using FPDF2.
-"""
-
-import re
-from fpdf import FPDF
-
-
-def export_to_pdf(data: dict, filename: str = "output.pdf") -> str:
-    """
-    Generate a formatted PDF from analysis data.
-
-    Args:
-        data: dict with keys: simplified, questions, keywords, difficulty
-        filename: output file path
-
-    Returns:
-        The filename that was written.
-    """
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_margins(15, 15, 15)
-    pdf.set_auto_page_break(auto=True, margin=15)
-
-    page_width = pdf.w - 30  # left + right margins
-
-    def sanitize(text: str, max_word: int = 40) -> str:
-        """Break long unbreakable words and ensure latin-1 compatibility."""
-        text = re.sub(
-            r"(\S{" + str(max_word) + r",})",
-            lambda m: " ".join(
-                m.group(0)[i : i + max_word]
-                for i in range(0, len(m.group(0)), max_word)
-            ),
-            text,
-        )
-        return text.encode("latin-1", errors="replace").decode("latin-1")
-
-    def write_heading(title: str):
-        pdf.set_font("Arial", style="B", size=12)
-        pdf.cell(page_width, 10, sanitize(title), ln=True, align="L")
-        pdf.set_font("Arial", size=12)
-
-    def write_body(text: str):
-        try:
-            pdf.multi_cell(page_width, 8, sanitize(text), align="L")
-        except Exception:
-            pass
-        pdf.ln(2)
-
-    # ── Title ─────────────────────────────────────────────
-    pdf.set_font("Arial", style="B", size=14)
-    pdf.cell(page_width, 12, "Smart Study Assistant Output", ln=True, align="C")
-    pdf.ln(4)
-
-    # ── Simplified Text ───────────────────────────────────
-    write_heading("Simplified Text:")
-    write_body(data.get("simplified", ""))
-    pdf.ln(2)
-
-    # ── Questions ─────────────────────────────────────────
-    write_heading("Questions:")
-    for q in data.get("questions", []):
-        q = q.strip()
-        if q:
-            write_body(f"- {q}")
-    pdf.ln(2)
-
-    # ── Keywords ──────────────────────────────────────────
-    write_heading("Keywords:")
-    write_body(", ".join(data.get("keywords", [])))
-    pdf.ln(2)
-
-    # ── Difficulty ────────────────────────────────────────
-    write_heading("Difficulty Level:")
-    write_body(data.get("difficulty", ""))
-
-    pdf.output(filename)
-    return filename
-</file>
-
 <file path="backend/services/question_generator.py">
 """
 question_generator.py — Practice question generation using Flan-T5.
@@ -724,27 +748,9 @@ def generate_questions(text: str) -> list[str]:
 
 <file path="backend/services/simplifier.py">
 """
-simplifier.py — Text simplification using Flan-T5 with spaCy fallback.
-
-Key improvements over v1:
-─────────────────────────
-1. Better prompt — "Rewrite in simple words:" is the most reliable instruction
-   for Flan-T5-base. It avoids the Q&A mode that produces "A:" / "B:" prefixes
-   and the summarizer mode that produces "This text is about..." artifacts.
-
-2. Chunk-based processing — instead of sentence-by-sentence (which loses context
-   and makes Flan-T5 produce one-word or echo outputs), we group sentences into
-   chunks of ~3 and simplify each chunk as a unit. This gives the model enough
-   context to produce meaningful simplified prose.
-
-3. Output sanitization — a post-processing pass strips known Flan-T5 artifacts:
-   • "A:" / "B:" / "Q:" answer-mode prefixes
-   • "This text is/focuses/explains/..." summarizer openers
-   • Numeric artifacts like "30 sentences" or "1."
-   • Duplication of the prompt itself in the output
-
-4. Fallback — unchanged: rule-based connector splitting when model output is
-   too short or too similar to the input.
+simplifier.py — Intelligent text simplification using Flan-T5 with
+                engineered prompts, repetition guards, chunk-aware processing,
+                and a rule-based fallback.
 """
 
 import re
@@ -753,9 +759,13 @@ from nltk.tokenize import sent_tokenize
 _nlp = None
 _generator = None
 
-# How many sentences to group into one chunk for the model
-_CHUNK_SIZE = 3
+# ── Config ───────────────────────────────────────────────────────────────────
+CHUNK_SIZE = 3
+MAX_NEW_TOKENS = 180
+SIMILARITY_BAIL_OUT = 0.88
 
+
+# ── Init ─────────────────────────────────────────────────────────────────────
 
 def init(nlp_model, generator_pipeline):
     global _nlp, _generator
@@ -763,168 +773,205 @@ def init(nlp_model, generator_pipeline):
     _generator = generator_pipeline
 
 
-# ── Output sanitizer ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Complex → Simple vocabulary map
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Patterns that indicate Flan-T5 went into Q&A or summarizer mode
-_ARTIFACT_PATTERNS = [
-    # Answer-mode prefixes: "A:", "B:", "A: ", "1.", "1) "
-    re.compile(r"^\s*[A-D]\s*:\s*", re.IGNORECASE),
-    re.compile(r"^\s*\d+[\.\)]\s*"),
-    # Summarizer openers
-    re.compile(r"^\s*This (text|passage|paragraph|article|section) (is|focuses|explains|describes|discusses|presents|aims|provides|covers|talks|states|argues|suggests|shows|highlights|examines)\b", re.IGNORECASE),
-    re.compile(r"^\s*The (text|passage|paragraph|article|author) (is|focuses|explains|describes|discusses|presents|argues|suggests|states)\b", re.IGNORECASE),
-    re.compile(r"^\s*A (student|reader|person|critical thinker)\b", re.IGNORECASE),
-    # Number-of-sentences artifacts
-    re.compile(r"^\s*\d+\s+sentences?\b", re.IGNORECASE),
-    # Science/Tech label artifacts
-    re.compile(r"^\s*Science\s*/\s*Tech\b", re.IGNORECASE),
-    # "AI Analysis is ON" — panel UI text that leaked into selection
-    re.compile(r"AI Analysis is (ON|OFF)", re.IGNORECASE),
-]
+_COMPLEX_WORDS = {
+    "ostensibly": "apparently",
+    "indispensable": "essential",
+    "metaphysical": "abstract",
+    "anthropogenic": "human-caused",
+    "facilitated": "helped",
+    "constitutes": "is",
+    "encompasses": "includes",
+    "proliferation": "spread",
+    "subsequently": "later",
+    "consequently": "so",
+    "furthermore": "also",
+    "nevertheless": "still",
+    "utilization": "use",
+    "demonstrate": "show",
+    "approximately": "about",
+    "numerous": "many",
+    "sufficient": "enough",
+    "implement": "carry out",
+    "obtain": "get",
+    "requires": "needs",
+    "therefore": "so",
+    "however": "but",
+    "significant": "important",
+    "fundamental": "basic",
+    "complexity": "difficulty",
+}
 
-def _sanitize(text: str) -> str:
-    """
-    Clean known Flan-T5 output artifacts from a simplified sentence/chunk.
-    Returns the cleaned string, or empty string if the whole output is junk.
-    """
-    text = text.strip()
 
-    # Strip answer-mode prefix from the start (may repeat: "A: B: real content")
-    for _ in range(4):
-        changed = False
-        for pat in _ARTIFACT_PATTERNS[:2]:   # only prefix patterns in loop
-            new = pat.sub("", text).strip()
-            if new != text:
-                text = new
-                changed = True
-        if not changed:
-            break
+# ─────────────────────────────────────────────────────────────────────────────
+# Similarity
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # If the whole sentence matches a summarizer/artifact pattern, discard it
-    for pat in _ARTIFACT_PATTERNS[2:]:
-        if pat.match(text):
-            return ""
+def _similarity_ratio(a: str, b: str) -> float:
+    wa = set(re.findall(r"\w+", a.lower()))
+    wb = set(re.findall(r"\w+", b.lower()))
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / len(wa | wb)
 
-    # Discard if output is suspiciously short (model gave up)
-    if len(text.split()) < 4:
-        return ""
+
+def _is_bad_output(original: str, output: str) -> bool:
+    output = output.strip()
+
+    if len(original.split()) > 15 and len(output.split()) < 8:
+        return True
+
+    if _similarity_ratio(original, output) >= SIMILARITY_BAIL_OUT:
+        return True
+
+    tokens = output.lower().split()
+    if len(tokens) > 8:
+        for i in range(len(tokens) - 6):
+            if tokens[i:i+3] == tokens[i+3:i+6] == tokens[i+6:i+9]:
+                return True
+
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rule-based fallback
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _rule_based_simplify(text: str) -> str:
+    result = text
+
+    for k, v in sorted(_COMPLEX_WORDS.items(), key=lambda x: -len(x[0])):
+        result = re.sub(rf"\b{k}\b", v, result, flags=re.IGNORECASE)
+
+    sentences = sent_tokenize(result)
+    cleaned = []
+
+    for s in sentences:
+        s = re.sub(r"\s+", " ", s).strip()
+        cleaned.append(s)
+
+    result = " ".join(cleaned)
+
+    result = re.sub(
+        r"^(so,|well,|basically,|in other words,|to put it simply,)\s*",
+        "",
+        result,
+        flags=re.IGNORECASE,
+    )
+
+    return result.strip()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prompt
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_prompt(chunk: str) -> str:
+    return f"""
+Rewrite this text in simple English.
+
+Rules:
+- Use short sentences
+- Use easy words
+- Keep meaning the same
+- Do NOT add information
+- Do NOT repeat phrases
+
+Text:
+{chunk}
+
+Simple version:
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model call
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _simplify_chunk(chunk: str) -> str:
+    prompt = _build_prompt(chunk)
+
+    result = _generator(
+        prompt,
+        max_new_tokens=MAX_NEW_TOKENS,
+        num_beams=4,
+        repetition_penalty=2.2,
+        no_repeat_ngram_size=4,
+        do_sample=False,
+    )
+
+    text = result[0]["generated_text"].strip()
+
+    if "Simple version:" in text:
+        text = text.split("Simple version:")[-1].strip()
+
+    if _is_bad_output(chunk, text):
+        return _rule_based_simplify(chunk)
 
     return text
 
 
-# ── Chunking ─────────────────────────────────────────────────────────────────
-
-def _chunk_sentences(sentences: list[str], size: int) -> list[str]:
-    """Group sentences into chunks of `size` for richer model context."""
-    return [
-        " ".join(sentences[i : i + size])
-        for i in range(0, len(sentences), size)
-    ]
-
-
-# ── Core simplifier ───────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Main API
+# ─────────────────────────────────────────────────────────────────────────────
 
 def simplify_text(text: str) -> str:
-    """
-    Simplify text by grouping sentences into chunks and running each through
-    Flan-T5 with a clean, unambiguous prompt.
-    """
-    # Pre-clean: remove any UI text that may have leaked into the selection
-    text = re.sub(r"AI Analysis is (ON|OFF)[^.]*\.", "", text, flags=re.IGNORECASE).strip()
-    text = re.sub(r"\s{2,}", " ", text)
+    if not text or not text.strip():
+        return ""
 
     sentences = sent_tokenize(text)
-    if not sentences:
-        return text
 
-    chunks = _chunk_sentences(sentences, _CHUNK_SIZE)
-    simplified_parts = []
+    chunks = [
+        " ".join(sentences[i:i + CHUNK_SIZE])
+        for i in range(0, len(sentences), CHUNK_SIZE)
+    ]
 
-    for chunk in chunks:
-        # Prompt tuned for Flan-T5-base:
-        # - "Rewrite in simple words:" reliably produces plain prose
-        # - Avoids Q&A trigger words ("what", "explain", "generate") that
-        #   cause "A:" prefix outputs
-        # - Avoids "summarize" which causes "This text is about..." outputs
-        prompt = f"Rewrite in simple words: {chunk}"
+    outputs = []
 
-        result = _generator(
-            prompt,
-            max_new_tokens=300,
-            num_beams=4,
-            do_sample=False,
-            early_stopping=True,
-            no_repeat_ngram_size=3,   # reduces repetition loops
-        )
+    for c in chunks:
+        outputs.append(_simplify_chunk(c))
 
-        raw = result[0]["generated_text"].strip()
-        cleaned = _sanitize(raw)
+    final = " ".join(outputs)
 
-        if cleaned:
-            simplified_parts.append(cleaned)
-        else:
-            # Fallback: rule-based simplification for this chunk
-            simplified_parts.append(_fallback_simplify(chunk))
+    if _is_bad_output(text, final):
+        return _rule_based_simplify(text)
 
-    result_text = " ".join(simplified_parts)
+    final = re.sub(r"\s{2,}", " ", final).strip()
 
-    # Final check: if the whole output still looks like junk, return fallback
-    junk_ratio = sum(1 for p in _ARTIFACT_PATTERNS if p.search(result_text)) 
-    if junk_ratio >= 2:
-        return _fallback_simplify(text)
-
-    return result_text
+    return final
 
 
-# ── Rule-based fallback ───────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Optional: debug helper
+# ─────────────────────────────────────────────────────────────────────────────
 
-def _fallback_simplify(text: str) -> str:
+def debug_simplify(text: str) -> dict:
     """
-    Rule-based simplification when the model output is unhelpful.
-    Splits on discourse connectors and drops empty/connector-only fragments.
+    Useful for testing pipeline behavior.
     """
-    doc = _nlp(text)
-    simple_sentences = []
-    connectors = {"however", "therefore", "furthermore", "consequently", "nevertheless",
-                  "additionally", "similarly", "moreover", "nonetheless"}
+    sentences = sent_tokenize(text)
 
-    for sent in doc.sents:
-        parts = re.split(
-            r"\b(however|therefore|furthermore|consequently|nevertheless|"
-            r"additionally|similarly|moreover|nonetheless)\b",
-            sent.text.strip(),
-            flags=re.IGNORECASE,
-        )
-        for part in parts:
-            part = part.strip()
-            if len(part.split()) > 5 and part.lower() not in connectors:
-                simple_sentences.append(part)
+    chunks = [
+        " ".join(sentences[i:i + CHUNK_SIZE])
+        for i in range(0, len(sentences), CHUNK_SIZE)
+    ]
 
-    return " ".join(simple_sentences) if simple_sentences else text
-</file>
+    results = []
 
-<file path="LICENSE">
-MIT License
+    for c in chunks:
+        results.append({
+            "chunk": c,
+            "output": _simplify_chunk(c)
+        })
 
-Copyright (c) 2026 Yugal Poudel
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+    return {
+        "original": text,
+        "chunks": results,
+        "final": simplify_text(text),
+    }
 </file>
 
 <file path="extension/background.js">
@@ -971,24 +1018,51 @@ chrome.action.onClicked.addListener((tab) => {
 </file>
 
 <file path="backend/requirements.txt">
-# FastAPI for backend
+# =========================================================
+# Backend Framework
+# =========================================================
 fastapi==0.116.1
-uvicorn==0.35.0
+uvicorn[standard]==0.35.0
 pydantic==2.10.6
+python-multipart==0.0.6
 
-# NLP and Transformers
+# =========================================================
+# NLP / AI
+# =========================================================
 transformers==4.57.6
 torch==2.9.1
+sentencepiece==0.2.0
+accelerate==1.10.1
+
+# =========================================================
+# spaCy + NLP Utilities
+# =========================================================
 spacy==3.8.13
 nltk==3.9.1
+
+# spaCy English model
 en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 
-# PDF generation
-fpdf2
+# =========================================================
+# PDF Generation
+# =========================================================
+fpdf2==2.8.3
 reportlab==4.0.0
 
-# Optional utilities
-python-multipart==0.0.6   # if you add file uploads later
+# =========================================================
+# Optional Performance Utilities
+# =========================================================
+protobuf>=4.25.3
+safetensors>=0.4.3
+numpy>=1.26.4
+
+# =========================================================
+# Compatibility Fixes
+# =========================================================
+regex>=2024.5.15
+tqdm>=4.67.1
+requests>=2.32.3
+packaging>=24.1
 </file>
 
 <file path="README.md">
