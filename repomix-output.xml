@@ -41,10 +41,8 @@ The content is organized as follows:
 
 <directory_structure>
 .gitignore
-backend/history.json
 backend/main.py
 backend/requirements.txt
-backend/runtime.txt
 backend/services/__init__.py
 backend/services/difficulty_detector.py
 backend/services/history_manager.py
@@ -60,7 +58,6 @@ extension/icon.png
 extension/manifest.json
 LICENSE
 README.md
-render.yaml
 </directory_structure>
 
 <files>
@@ -366,10 +363,71 @@ def delete_history_item(index: int) -> bool:
 
 <file path="backend/services/keyword_extractor.py">
 """
-keyword_extractor.py — Keyword extraction using spaCy POS tagging.
+keyword_extractor.py — Weighted keyword extraction using spaCy.
+
+Algorithm (replaces the old "all nouns" approach):
+───────────────────────────────────────────────────
+1. Candidate selection
+   - Tokens that are NOUN or PROPN, not a stop word, length > 2
+   - Named-entity spans (any label) are always candidates
+
+2. Scoring  (higher = more important)
+   Each candidate lemma gets a composite score:
+
+   a) Term Frequency (TF) — how often the lemma appears in the text
+      (normalized by total candidate count so long texts don't dominate)
+
+   b) IDF proxy — log(total_sentences / sentences_containing_lemma)
+      Words that appear in every sentence are too generic; rare ones score higher.
+
+   c) Positional boost — words in the first sentence get ×1.3
+      (topic sentences usually introduce key concepts)
+
+   d) NER boost — ×1.5 if the token is inside a named-entity span
+      (spaCy already did the hard work of finding important spans)
+
+   e) Noun-chunk-head boost — ×1.2 if the token is the head of a noun chunk
+      ("machine learning" → "learning" is the head and the real concept)
+
+   f) Title-case boost — ×1.1 for title-cased words that are not sentence-start
+      (often domain-specific proper nouns that spaCy's NER missed)
+
+3. Per-sentence cap
+   Sort candidates by score descending.
+   Walk sentences; keep at most MAX_KW_PER_SENTENCE keywords per sentence,
+   choosing the highest-scored ones from that sentence.
+   This prevents one long sentence from monopolising the keyword list.
+
+4. Global top-N
+   After the per-sentence pass, sort survivors by score and return the
+   top MAX_TOTAL keywords (default 12).
+
+Exposed function
+────────────────
+    extract_keywords(text: str) -> list[str]
+        Returns a list of keyword strings (original surface form, title-cased
+        for readability) sorted by descending score.
 """
 
+import math
+from collections import defaultdict
+
 _nlp = None
+
+# ── Tuneable parameters ──────────────────────────────────────────────────────
+MAX_KW_PER_SENTENCE = 2    # supervisor requirement: ≤ 2 per sentence
+MAX_TOTAL           = 12   # hard cap on total keywords returned
+MIN_WORD_LEN        = 3    # ignore very short tokens
+
+# Noisy generic nouns that slip through the stop-word list
+_GENERIC_NOUNS = {
+    "thing", "things", "way", "ways", "kind", "kinds", "type", "types",
+    "part", "parts", "case", "cases", "example", "examples", "point",
+    "fact", "facts", "time", "times", "number", "numbers", "lot", "lots",
+    "use", "uses", "need", "needs", "place", "places", "person", "people",
+    "world", "day", "days", "year", "years", "bit", "bits", "form", "forms",
+    "result", "results", "area", "areas", "aspect", "aspects", "sense",
+}
 
 
 def init(nlp_model):
@@ -377,20 +435,132 @@ def init(nlp_model):
     _nlp = nlp_model
 
 
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _sentences(doc):
+    """Return list of spaCy sentence spans."""
+    return list(doc.sents)
+
+
+def _ner_token_set(doc):
+    """Return set of token indices that belong to any named-entity span."""
+    ner_indices = set()
+    for ent in doc.ents:
+        for tok in ent:
+            ner_indices.add(tok.i)
+    return ner_indices
+
+
+def _noun_chunk_head_set(doc):
+    """Return set of token indices that are heads of noun chunks."""
+    return {chunk.root.i for chunk in doc.noun_chunks}
+
+
+def _is_title_cased_non_start(token, sentences):
+    """True if token is title-cased AND not the first token in its sentence."""
+    if not token.text[0].isupper():
+        return False
+    for sent in sentences:
+        if token.i == sent.start:   # sentence-opening capitals don't count
+            return False
+    return True
+
+
+# ── Core ─────────────────────────────────────────────────────────────────────
+
 def extract_keywords(text: str) -> list[str]:
-    """Extract unique meaningful nouns and proper nouns from text."""
-    doc = _nlp(text)
-    keywords = set()
+    """
+    Return a ranked list of important keywords extracted from *text*.
+    At most MAX_KW_PER_SENTENCE keywords come from any single sentence,
+    and at most MAX_TOTAL keywords are returned overall.
+    """
+    if not text or not text.strip():
+        return []
 
-    for token in doc:
-        if (
-            token.pos_ in {"NOUN", "PROPN"}
-            and not token.is_stop
-            and len(token.text) > 2
-        ):
-            keywords.add(token.text.lower())
+    doc       = _nlp(text)
+    sentences = _sentences(doc)
+    n_sents   = max(len(sentences), 1)
 
-    return sorted(keywords)  # sorted for deterministic output
+    ner_set         = _ner_token_set(doc)
+    chunk_head_set  = _noun_chunk_head_set(doc)
+
+    # ── 1. Collect candidates ────────────────────────────────────────────────
+    # candidate: (token, lemma, sentence_index)
+    candidates = []
+    for s_idx, sent in enumerate(sentences):
+        for token in sent:
+            if (
+                token.pos_ in {"NOUN", "PROPN"}
+                and not token.is_stop
+                and len(token.text) > MIN_WORD_LEN
+                and token.lemma_.lower() not in _GENERIC_NOUNS
+                and token.text.isalpha()          # skip numbers / symbols
+            ):
+                candidates.append((token, token.lemma_.lower(), s_idx))
+
+    if not candidates:
+        return []
+
+    # ── 2. Compute TF ────────────────────────────────────────────────────────
+    lemma_tf: dict[str, int] = defaultdict(int)
+    for _, lemma, _ in candidates:
+        lemma_tf[lemma] += 1
+    total_candidates = max(sum(lemma_tf.values()), 1)
+
+    # ── 3. Compute IDF proxy ─────────────────────────────────────────────────
+    # sentences_with_lemma[lemma] = number of sentences containing the lemma
+    sentences_with_lemma: dict[str, set] = defaultdict(set)
+    for _, lemma, s_idx in candidates:
+        sentences_with_lemma[lemma].add(s_idx)
+
+    def idf(lemma: str) -> float:
+        df = len(sentences_with_lemma[lemma])
+        return math.log((n_sents + 1) / (df + 1)) + 1.0   # smoothed, always ≥ 1
+
+    # ── 4. Score every candidate token ───────────────────────────────────────
+    # lemma → best (score, surface_form, sentence_index)
+    lemma_best: dict[str, tuple[float, str, int]] = {}
+
+    for token, lemma, s_idx in candidates:
+        tf_score   = lemma_tf[lemma] / total_candidates
+        idf_score  = idf(lemma)
+        base_score = tf_score * idf_score
+
+        # Boosts (multiplicative)
+        boost = 1.0
+        if token.i in ner_set:                              # named entity
+            boost *= 1.5
+        if token.i in chunk_head_set:                       # noun-chunk head
+            boost *= 1.2
+        if _is_title_cased_non_start(token, sentences):     # title-cased
+            boost *= 1.1
+        if s_idx == 0:                                      # first sentence
+            boost *= 1.3
+
+        score = base_score * boost
+
+        # Keep the highest-scored occurrence of each lemma
+        if lemma not in lemma_best or score > lemma_best[lemma][0]:
+            lemma_best[lemma] = (score, token.text, s_idx)
+
+    # ── 5. Per-sentence cap ──────────────────────────────────────────────────
+    # Sort all surviving lemmas by score descending, then greedily pick
+    # up to MAX_KW_PER_SENTENCE per sentence.
+    ranked = sorted(lemma_best.values(), key=lambda x: x[0], reverse=True)
+
+    sentence_kw_count: dict[int, int] = defaultdict(int)
+    selected: list[tuple[float, str]] = []   # (score, surface_form)
+
+    for score, surface, s_idx in ranked:
+        if sentence_kw_count[s_idx] < MAX_KW_PER_SENTENCE:
+            selected.append((score, surface))
+            sentence_kw_count[s_idx] += 1
+        if len(selected) >= MAX_TOTAL:
+            break
+
+    # ── 6. Return top-N sorted by score ─────────────────────────────────────
+    selected.sort(key=lambda x: x[0], reverse=True)
+    return [surface.lower() for _, surface in selected[:MAX_TOTAL]]
 </file>
 
 <file path="backend/services/model_loader.py">
@@ -555,15 +725,36 @@ def generate_questions(text: str) -> list[str]:
 <file path="backend/services/simplifier.py">
 """
 simplifier.py — Text simplification using Flan-T5 with spaCy fallback.
+
+Key improvements over v1:
+─────────────────────────
+1. Better prompt — "Rewrite in simple words:" is the most reliable instruction
+   for Flan-T5-base. It avoids the Q&A mode that produces "A:" / "B:" prefixes
+   and the summarizer mode that produces "This text is about..." artifacts.
+
+2. Chunk-based processing — instead of sentence-by-sentence (which loses context
+   and makes Flan-T5 produce one-word or echo outputs), we group sentences into
+   chunks of ~3 and simplify each chunk as a unit. This gives the model enough
+   context to produce meaningful simplified prose.
+
+3. Output sanitization — a post-processing pass strips known Flan-T5 artifacts:
+   • "A:" / "B:" / "Q:" answer-mode prefixes
+   • "This text is/focuses/explains/..." summarizer openers
+   • Numeric artifacts like "30 sentences" or "1."
+   • Duplication of the prompt itself in the output
+
+4. Fallback — unchanged: rule-based connector splitting when model output is
+   too short or too similar to the input.
 """
 
 import re
-import spacy
 from nltk.tokenize import sent_tokenize
 
-# Loaded externally and injected to avoid circular import / duplicate load
 _nlp = None
 _generator = None
+
+# How many sentences to group into one chunk for the model
+_CHUNK_SIZE = 3
 
 
 def init(nlp_model, generator_pipeline):
@@ -572,47 +763,135 @@ def init(nlp_model, generator_pipeline):
     _generator = generator_pipeline
 
 
-def simplify_text(text: str) -> str:
-    """Simplify text sentence-by-sentence using Flan-T5."""
-    sentences = sent_tokenize(text)
-    simplified_sentences = []
+# ── Output sanitizer ─────────────────────────────────────────────────────────
 
-    for sent in sentences:
-        prompt = f"Simplify this text for a student: {sent}"
+# Patterns that indicate Flan-T5 went into Q&A or summarizer mode
+_ARTIFACT_PATTERNS = [
+    # Answer-mode prefixes: "A:", "B:", "A: ", "1.", "1) "
+    re.compile(r"^\s*[A-D]\s*:\s*", re.IGNORECASE),
+    re.compile(r"^\s*\d+[\.\)]\s*"),
+    # Summarizer openers
+    re.compile(r"^\s*This (text|passage|paragraph|article|section) (is|focuses|explains|describes|discusses|presents|aims|provides|covers|talks|states|argues|suggests|shows|highlights|examines)\b", re.IGNORECASE),
+    re.compile(r"^\s*The (text|passage|paragraph|article|author) (is|focuses|explains|describes|discusses|presents|argues|suggests|states)\b", re.IGNORECASE),
+    re.compile(r"^\s*A (student|reader|person|critical thinker)\b", re.IGNORECASE),
+    # Number-of-sentences artifacts
+    re.compile(r"^\s*\d+\s+sentences?\b", re.IGNORECASE),
+    # Science/Tech label artifacts
+    re.compile(r"^\s*Science\s*/\s*Tech\b", re.IGNORECASE),
+    # "AI Analysis is ON" — panel UI text that leaked into selection
+    re.compile(r"AI Analysis is (ON|OFF)", re.IGNORECASE),
+]
+
+def _sanitize(text: str) -> str:
+    """
+    Clean known Flan-T5 output artifacts from a simplified sentence/chunk.
+    Returns the cleaned string, or empty string if the whole output is junk.
+    """
+    text = text.strip()
+
+    # Strip answer-mode prefix from the start (may repeat: "A: B: real content")
+    for _ in range(4):
+        changed = False
+        for pat in _ARTIFACT_PATTERNS[:2]:   # only prefix patterns in loop
+            new = pat.sub("", text).strip()
+            if new != text:
+                text = new
+                changed = True
+        if not changed:
+            break
+
+    # If the whole sentence matches a summarizer/artifact pattern, discard it
+    for pat in _ARTIFACT_PATTERNS[2:]:
+        if pat.match(text):
+            return ""
+
+    # Discard if output is suspiciously short (model gave up)
+    if len(text.split()) < 4:
+        return ""
+
+    return text
+
+
+# ── Chunking ─────────────────────────────────────────────────────────────────
+
+def _chunk_sentences(sentences: list[str], size: int) -> list[str]:
+    """Group sentences into chunks of `size` for richer model context."""
+    return [
+        " ".join(sentences[i : i + size])
+        for i in range(0, len(sentences), size)
+    ]
+
+
+# ── Core simplifier ───────────────────────────────────────────────────────────
+
+def simplify_text(text: str) -> str:
+    """
+    Simplify text by grouping sentences into chunks and running each through
+    Flan-T5 with a clean, unambiguous prompt.
+    """
+    # Pre-clean: remove any UI text that may have leaked into the selection
+    text = re.sub(r"AI Analysis is (ON|OFF)[^.]*\.", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\s{2,}", " ", text)
+
+    sentences = sent_tokenize(text)
+    if not sentences:
+        return text
+
+    chunks = _chunk_sentences(sentences, _CHUNK_SIZE)
+    simplified_parts = []
+
+    for chunk in chunks:
+        # Prompt tuned for Flan-T5-base:
+        # - "Rewrite in simple words:" reliably produces plain prose
+        # - Avoids Q&A trigger words ("what", "explain", "generate") that
+        #   cause "A:" prefix outputs
+        # - Avoids "summarize" which causes "This text is about..." outputs
+        prompt = f"Rewrite in simple words: {chunk}"
+
         result = _generator(
             prompt,
-            max_new_tokens=250,
+            max_new_tokens=300,
             num_beams=4,
             do_sample=False,
             early_stopping=True,
+            no_repeat_ngram_size=3,   # reduces repetition loops
         )
-        simplified = result[0]["generated_text"].strip()
 
-        # Fallback: output too short
-        if not simplified or len(simplified) < 10:
-            simplified = _fallback_simplify(sent)
+        raw = result[0]["generated_text"].strip()
+        cleaned = _sanitize(raw)
+
+        if cleaned:
+            simplified_parts.append(cleaned)
         else:
-            # Fallback: model just echoed the input
-            original_words = set(sent.lower().split())
-            output_words = set(simplified.lower().split())
-            overlap = len(original_words & output_words) / max(len(original_words), 1)
-            if overlap > 0.85:
-                simplified = _fallback_simplify(sent)
+            # Fallback: rule-based simplification for this chunk
+            simplified_parts.append(_fallback_simplify(chunk))
 
-        simplified_sentences.append(simplified)
+    result_text = " ".join(simplified_parts)
 
-    return " ".join(simplified_sentences)
+    # Final check: if the whole output still looks like junk, return fallback
+    junk_ratio = sum(1 for p in _ARTIFACT_PATTERNS if p.search(result_text)) 
+    if junk_ratio >= 2:
+        return _fallback_simplify(text)
 
+    return result_text
+
+
+# ── Rule-based fallback ───────────────────────────────────────────────────────
 
 def _fallback_simplify(text: str) -> str:
-    """Rule-based simplification when the model output is unhelpful."""
+    """
+    Rule-based simplification when the model output is unhelpful.
+    Splits on discourse connectors and drops empty/connector-only fragments.
+    """
     doc = _nlp(text)
     simple_sentences = []
-    connectors = {"however", "therefore", "furthermore", "consequently", "nevertheless"}
+    connectors = {"however", "therefore", "furthermore", "consequently", "nevertheless",
+                  "additionally", "similarly", "moreover", "nonetheless"}
 
     for sent in doc.sents:
         parts = re.split(
-            r"\b(however|therefore|furthermore|consequently|nevertheless)\b",
+            r"\b(however|therefore|furthermore|consequently|nevertheless|"
+            r"additionally|similarly|moreover|nonetheless)\b",
             sent.text.strip(),
             flags=re.IGNORECASE,
         )
@@ -648,181 +927,68 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 </file>
 
-<file path="backend/runtime.txt">
-python-3.11.9
-</file>
-
-<file path="backend/history.json">
-[
-  {
-    "input": "The theory of relativity comprises two physics theories by Albert Einstein: special relativity and general relativity, proposed and published in 1905 and 1915, respectively.[1] Special relativity applies to all physical phenomena in the absence of gravity. General relativity explains the law of gravitation and its relation to the forces of nature.[2] It applies to the cosmological and astrophysical realm, including astronomy.[3]",
-    "simplified": "The theory of relativity comprises two physics theories by Albert Einstein: special relativity and general relativity. [1] Special relativity applies to all physical phenomena in the absence of gravity. The law of gravitation explains the law of gravity and its relation to the forces of nature. [2] It applies to the cosmological and astrophysical realm, including astronomy. [3]",
-    "questions": [
-      "What two physics theories were proposed by Einstein?",
-      "What is special relativity?",
-      "What is the law of gravitation?",
-      "What are the cosmological and astrophysical realms?",
-      "How many points did the team score in the first half?"
-    ],
-    "keywords": [
-      "absence",
-      "albert",
-      "astronomy.[3",
-      "einstein",
-      "forces",
-      "gravitation",
-      "gravity",
-      "law",
-      "nature.[2",
-      "phenomena",
-      "physics",
-      "realm",
-      "relation",
-      "relativity",
-      "respectively.[1",
-      "theories",
-      "theory"
-    ],
-    "difficulty": "Medium"
-  },
-  {
-    "input": "By comparison, general relativity did not appear to be as useful, beyond making minor corrections to predictions of Newtonian gravitation theory.[3] It seemed to offer little potential for experimental test, as most of its assertions were on an astronomical scale. Its mathematics seemed difficult and fully understandable only by a small number of people. Around 1960, general relativity became central to physics and astronomy. New mathematical techniques to apply to general relativity streamlined calculations and made its concepts more easily visualized. As astronomical phenomena were discovered, such as quasars (1963), the 3-kelvin microwave background radiation (1965), pulsars (1967), and the first black hole candidates (1981),[3] the theory explained their attributes, and measurement of them further confirmed the theory.",
-    "simplified": "A: General relativity did not appear to be as useful, beyond making minor corrections to predictions of Newtonian gravitation theory A student would need to be able to observe the astronomical scale of the object. Its mathematics seemed difficult and fully understandable only by a small number of people. General relativity is a theory of relativity based on the laws of physics. A student will learn how to calculate general relativity using new mathematical techniques. This text focuses on a number of astronomical phenomena.",
-    "questions": [
-      "What is the difference between general relativity and Newtonian gravitation theory?",
-      "What is the name of the astronomical scale?",
-      "How many people did it seem difficult and fully understandable?",
-      "When did general relativity become central to physics?",
-      "What are the new mathematical techniques to apply to general relativity?"
-    ],
-    "keywords": [
-      "assertions",
-      "astronomy",
-      "attributes",
-      "background",
-      "calculations",
-      "candidates",
-      "comparison",
-      "concepts",
-      "corrections",
-      "gravitation",
-      "hole",
-      "kelvin",
-      "mathematics",
-      "measurement",
-      "microwave",
-      "number",
-      "people",
-      "phenomena",
-      "physics",
-      "potential",
-      "predictions",
-      "pulsars",
-      "quasars",
-      "radiation",
-      "relativity",
-      "scale",
-      "techniques",
-      "test",
-      "theory",
-      "theory.[3"
-    ],
-    "difficulty": "Medium"
-  }
-]
-</file>
-
 <file path="extension/background.js">
-// background.js — Service Worker for Smart Study Assistant (MV3)
-//
-// Responsibilities:
-//   1. Listen for the extension icon click
-//   2. Toggle the in-page content script panel
-//   3. Inject content.js on tabs that were open before install
-//
-// Edge Store compliance notes:
-//   - No network requests made here (all API calls are in content.js)
-//   - No eval(), no inline scripts
-//   - Guards against non-http/https tabs (chrome://, edge://, etc.)
-//   - All chrome API errors explicitly handled
-
-"use strict";
+// background.js — Service worker for Smart Study Assistant MV3
+// Handles extension icon click → toggles the in-page panel.
 
 chrome.action.onClicked.addListener((tab) => {
-  // Guard: content scripts cannot run on browser internal pages
+  // Guard: only works on http/https pages
   if (
     !tab.id ||
     !tab.url ||
     (!tab.url.startsWith("http://") && !tab.url.startsWith("https://"))
   ) {
-    console.warn("[SSA] Cannot inject into this tab:", tab?.url ?? "unknown");
+    console.warn("[SSA background] Cannot inject into this tab:", tab.url);
     return;
   }
 
-  // Attempt to message the already-running content script
+  // Send toggle to the already-running content script.
+  // If it fails (tab opened before extension install), inject THEN show — never toggle twice.
+  // Key fix: after injection we send "show-panel" (always shows) NOT "toggle-panel"
+  // (which would toggle an already-visible panel back to hidden on the 2nd call).
   chrome.tabs.sendMessage(tab.id, { action: "toggle-panel" }, () => {
-    if (!chrome.runtime.lastError) {
-      // Content script was alive — message delivered successfully
-      return;
-    }
-
-    // Content script not yet alive on this tab (tab was open before install,
-    // or navigated to a new page). Inject it programmatically.
-    chrome.scripting.executeScript(
-      { target: { tabId: tab.id }, files: ["content.js"] },
-      () => {
-        if (chrome.runtime.lastError) {
-          console.error("[SSA] Script injection failed:", chrome.runtime.lastError.message);
-          return;
+    if (chrome.runtime.lastError) {
+      // Content script not alive yet — inject it, then explicitly SHOW the panel.
+      chrome.scripting.executeScript(
+        { target: { tabId: tab.id }, files: ["content.js"] },
+        () => {
+          if (chrome.runtime.lastError) {
+            console.error(
+              "[SSA background] Inject failed:",
+              chrome.runtime.lastError.message
+            );
+            return;
+          }
+          // Give content script time to boot (storage.get + DOM setup)
+          setTimeout(() => {
+            chrome.tabs.sendMessage(tab.id, { action: "show-panel" });
+          }, 250);
         }
-
-        // Wait briefly for content.js to initialise its chrome.storage.local read,
-        // then send the toggle message.
-        setTimeout(() => {
-          chrome.tabs.sendMessage(tab.id, { action: "toggle-panel" }, () => {
-            if (chrome.runtime.lastError) {
-              console.warn("[SSA] Post-inject message failed:", chrome.runtime.lastError.message);
-            }
-          });
-        }, 200);
-      }
-    );
+      );
+    }
   });
 });
 </file>
 
-<file path="render.yaml">
-services:
-  - type: web
-    name: smart-study-assistant-api
-    runtime: python
-    rootDir: backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: ANTHROPIC_API_KEY
-        sync: false          # set this manually in Render dashboard — never commit it
-    healthCheckPath: /health
-    autoDeploy: true
-</file>
-
 <file path="backend/requirements.txt">
-# Smart Study Assistant — Render-optimised requirements
-# Total install size: ~80 MB (vs ~4 GB with local models)
-
-# Web framework
+# FastAPI for backend
 fastapi==0.116.1
 uvicorn==0.35.0
 pydantic==2.10.6
 
-# Anthropic Claude API — replaces spaCy + Flan-T5 entirely
-anthropic==0.57.0
+# NLP and Transformers
+transformers==4.57.6
+torch==2.9.1
+spacy==3.8.13
+nltk==3.9.1
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 
 # PDF generation
-fpdf2==2.8.3
+fpdf2
+reportlab==4.0.0
 
-# File upload support (if needed later)
-python-multipart==0.0.6
+# Optional utilities
+python-multipart==0.0.6   # if you add file uploads later
 </file>
 
 <file path="README.md">
@@ -830,15 +996,15 @@ python-multipart==0.0.6
 
 # 🧠 Smart Study Assistant
 
-### _AI-Powered Learning Companion — Chrome/Edge Extension + FastAPI on Render_
+### _AI-Powered Learning Companion — Chrome/Edge Extension + FastAPI Backend_
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![Claude API](https://img.shields.io/badge/Claude-API-D97706?style=for-the-badge)](https://anthropic.com)
-[![Render](https://img.shields.io/badge/Hosted_on-Render-46E3B7?style=for-the-badge)](https://render.com)
-[![Edge Extension](https://img.shields.io/badge/Chrome%2FEdge-MV3-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white)](https://developer.chrome.com/docs/extensions/)
+[![Chrome Extension](https://img.shields.io/badge/Chrome%2FEdge-Extension_MV3-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white)](https://developer.chrome.com/docs/extensions/)
+[![HuggingFace](https://img.shields.io/badge/HuggingFace-Transformers-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black)](https://huggingface.co)
+[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
-> **Select any text → instant AI simplification, questions, keywords & difficulty — powered by Claude, hosted on Render.**
+> **Select any text on the web → Get instant simplification, practice questions, keywords, and difficulty analysis — inside a sleek draggable panel.**
 
 </div>
 
@@ -848,92 +1014,69 @@ python-multipart==0.0.6
 
 | Feature | Description |
 |---------|-------------|
-| 📝 **Text Simplification** | Rewrites complex text in plain language using Claude |
-| ❓ **Question Generation** | Auto-generates 5 practice questions |
-| 🔑 **Keyword Extraction** | Pulls key concepts from the text |
-| 📊 **Difficulty Detection** | Easy / Medium / Hard classification |
-| 📜 **Analysis History** | Browse and revisit past analyses |
-| 📄 **PDF Export** | Download a formatted study report |
-| 🔛 **ON/OFF Toggle** | User controls when analysis runs |
-| 🖱️ **Draggable Panel** | Floating, resizable, minimizable UI |
+| 📝 **Text Simplification** | Breaks down complex paragraphs using Google's Flan-T5 model |
+| ❓ **Question Generation** | Auto-generates up to 5 practice questions from selected text |
+| 🔑 **Keyword Extraction** | Identifies key nouns and proper nouns using spaCy |
+| 📊 **Difficulty Detection** | Classifies text as Easy, Medium, or Hard |
+| 📜 **Analysis History** | Persistent history — browse, revisit, or delete entries |
+| 📄 **PDF Export** | Export analysis as a clean formatted PDF |
+| 🖱️ **Draggable Panel** | Floating, resizable, minimizable in-page UI |
 
 ---
 
 ## 🏗️ Architecture
 
 ```
-Chrome/Edge Extension
-       │
-       │  HTTPS (fetch)
-       ▼
-FastAPI on Render  ──►  Anthropic Claude API
-   (50 MB RAM)            (does all NLP)
-       │
-       ▼
-  history.json (local to Render instance)
-```
-
-**Old architecture:** Extension → Local FastAPI + spaCy + Flan-T5 (~4 GB RAM)
-**New architecture:** Extension → Render FastAPI (~50 MB RAM) → Claude API
-
----
-
-## 🏗️ Project Structure
-
-```
 smart-study-assistant/
-│
-├── render.yaml                        # Render deployment config
 │
 ├── backend/
 │   ├── main.py                        # FastAPI server + all API endpoints
-│   ├── requirements.txt               # Minimal deps (~80 MB install)
+│   ├── requirements.txt
 │   └── services/
 │       ├── __init__.py
-│       ├── nlp_service.py             # Claude API integration (replaces all local models)
+│       ├── nlp_service.py             # Orchestrator — wires all modules together
+│       ├── model_loader.py            # Singleton loader for spaCy + Flan-T5
+│       ├── simplifier.py              # Text simplification (Flan-T5 + fallback)
+│       ├── question_generator.py      # Question generation (Flan-T5)
+│       ├── keyword_extractor.py       # Keyword extraction (spaCy POS)
+│       ├── difficulty_detector.py     # Easy / Medium / Hard classifier
 │       ├── pdf_exporter.py            # FPDF2 PDF generation
 │       └── history_manager.py         # JSON-backed history CRUD
 │
 ├── extension/
 │   ├── manifest.json                  # Chrome/Edge Manifest V3
-│   ├── background.js                  # Service worker
-│   ├── content.js                     # In-page panel + UI logic
-│   └── icon.png
+│   ├── background.js                  # Service worker — icon click handler
+│   ├── content.js                     # In-page draggable panel + UI logic
+│   └── icon.png                       # Extension icon
 │
 └── README.md
 ```
 
 ---
 
-## 🚀 Deployment Guide
+## 🚀 Getting Started
 
-### Step 1 — Deploy Backend to Render
+### Prerequisites
 
-1. Push this repo to **GitHub**
-2. Go to [render.com](https://render.com) → **New Web Service**
-3. Connect your GitHub repo
-4. Render auto-detects `render.yaml` — click **Deploy**
-5. In the Render dashboard → **Environment** → add:
-   ```
-   ANTHROPIC_API_KEY = sk-ant-api03-...your-new-key...
-   ```
-6. Copy your Render URL: `https://YOUR-APP-NAME.onrender.com`
+- **Python 3.10+**
+- **Google Chrome** or **Microsoft Edge**
+- **pip** package manager
 
-> ⚠️ **Never commit your API key.** Set it only in the Render dashboard environment variables.
+### 1️⃣ Backend Setup
 
-### Step 2 — Update Extension with Your Render URL
+```bash
+git clone https://github.com/yourusername/smart-study-assistant.git
+cd smart-study-assistant/backend
 
-Open `extension/content.js` and update line 10:
+pip install -r requirements.txt
 
-```js
-// Change this:
-const API_BASE = "https://YOUR-APP-NAME.onrender.com";
-
-// To your actual Render URL, e.g.:
-const API_BASE = "https://smart-study-assistant-api.onrender.com";
+# Start the server
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-### Step 3 — Load Extension in Edge/Chrome
+> 💡 On first run, the Flan-T5 model (~990 MB) downloads automatically. spaCy's `en_core_web_sm` is installed via `requirements.txt`.
+
+### 2️⃣ Extension Setup (Chrome or Edge)
 
 **Chrome:**
 1. Go to `chrome://extensions`
@@ -945,16 +1088,19 @@ const API_BASE = "https://smart-study-assistant-api.onrender.com";
 2. Enable **Developer Mode**
 3. Click **Load unpacked** → select the `extension/` folder
 
+> ✅ The `manifest.json` is Manifest V3 compliant and accepted by both Chrome Web Store and Microsoft Edge Add-ons store.
+
 ---
 
 ## 🎯 How to Use
 
-1. Click the extension icon to open the panel
-2. **Toggle ON** the AI Analysis switch (gray → green)
-3. **Select any text** (20+ characters) on any webpage
-4. Results appear instantly: Simplified, Questions, Keywords, Difficulty
-5. Click **Export PDF** to download a formatted report
-6. Visit **History** tab to review past analyses
+1. **Select any text** (20+ characters) on a webpage
+2. The **floating panel** appears with analysis results
+3. Switch tabs: **Simplified**, **Questions**, **Keywords**, **Difficulty**
+4. Click **Export PDF** to download a formatted report
+5. Visit **History** to review past analyses
+6. Click any history entry to view full details
+7. Use 🗑️ to delete individual entries
 
 ---
 
@@ -962,11 +1108,10 @@ const API_BASE = "https://smart-study-assistant-api.onrender.com";
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/health` | Render health check |
-| `POST` | `/analyze` | Analyze text via Claude API |
-| `GET` | `/history` | List past analyses |
-| `DELETE` | `/history/{index}` | Delete a history entry |
-| `POST` | `/export-pdf` | Download PDF report |
+| `POST` | `/analyze` | Analyze text → simplified, questions, keywords, difficulty |
+| `GET` | `/history` | List all past analyses |
+| `DELETE` | `/history/{index}` | Delete a specific history entry |
+| `POST` | `/export-pdf` | Generate & download a PDF report |
 
 ---
 
@@ -974,20 +1119,11 @@ const API_BASE = "https://smart-study-assistant-api.onrender.com";
 
 | Layer | Technology |
 |-------|-----------|
-| 🤖 **AI** | Anthropic Claude (claude-sonnet-4-20250514) |
+| 🤖 **NLP Model** | Google Flan-T5 Base (HuggingFace Transformers) |
+| 🔤 **NLP Processing** | spaCy (en_core_web_sm) + NLTK |
 | ⚡ **Backend** | FastAPI + Uvicorn |
-| ☁️ **Hosting** | Render (free tier, ~50 MB RAM) |
-| 📄 **PDF** | FPDF2 |
+| 📄 **PDF Generation** | FPDF2 |
 | 🌐 **Extension** | Chrome/Edge Manifest V3, Vanilla JS |
-
----
-
-## 🔐 Security Notes
-
-- API key is stored **only** in Render's environment variables
-- Extension fetches from Render over **HTTPS**
-- No user data is stored beyond local `history.json` on the Render instance
-- XSS protection on all rendered content in the extension panel
 
 ---
 
@@ -998,11 +1134,15 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 <file path="backend/main.py">
 """
-main.py — FastAPI server for Smart Study Assistant (Claude API backend).
-Designed to run on Render free tier (~512 MB RAM).
+main.py — FastAPI server for Smart Study Assistant.
+
+Endpoints:
+    POST   /analyze          → run all NLP tasks
+    GET    /history          → list all past analyses
+    DELETE /history/{index}  → remove one history entry
+    POST   /export-pdf       → stream a PDF download
 """
 
-import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -1013,12 +1153,11 @@ from services.nlp_service import (
     analyze_text,
     get_history,
     delete_history_item,
+    export_to_pdf,
 )
-from services.pdf_exporter import export_to_pdf
 
-app = FastAPI(title="Smart Study Assistant API", version="4.0")
+app = FastAPI(title="Smart Study Assistant API", version="2.0")
 
-# ── CORS — allow the extension (chrome-extension://) and any origin ───────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -1028,7 +1167,7 @@ app.add_middleware(
 )
 
 
-# ── Request models ────────────────────────────────────────────────────────────
+# ── Request / Response models ─────────────────────────────────────────────────
 
 class TextRequest(BaseModel):
     text: str
@@ -1043,20 +1182,9 @@ class ExportRequest(BaseModel):
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-@app.get("/health")
-def health():
-    """Render health check — keeps the service alive."""
-    return {"status": "ok", "version": "4.0"}
-
-
 @app.post("/analyze")
 def analyze(req: TextRequest):
-    if not req.text or len(req.text.strip()) < 10:
-        raise HTTPException(status_code=400, detail="Text too short (min 10 chars)")
-    try:
-        return analyze_text(req.text)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return analyze_text(req.text)
 
 
 @app.get("/history")
@@ -1080,612 +1208,206 @@ def export_pdf(req: ExportRequest):
         "keywords": req.keywords,
         "difficulty": req.difficulty,
     }
-    try:
-        filename = export_to_pdf(data)
-        return StreamingResponse(
-            open(filename, "rb"),
-            media_type="application/pdf",
-            headers={"Content-Disposition": "attachment; filename=study_output.pdf"},
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    filename = export_to_pdf(data)
+    return StreamingResponse(
+        open(filename, "rb"),
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=study_output.pdf"},
+    )
 </file>
 
 <file path="backend/services/nlp_service.py">
 """
-nlp_service.py — Uses Claude API (claude-sonnet-4-20250514) instead of local
-                 spaCy + Flan-T5 models. Runs on ~50 MB RAM — Render-friendly.
+nlp_service.py — Orchestrator: wires models into sub-modules and exposes
+                 the single public entry point `analyze_text()`.
+
+Sub-modules:
+    model_loader       — spaCy + Flan-T5 singleton
+    simplifier         — sentence-by-sentence simplification
+    question_generator — practice question generation
+    keyword_extractor  — noun/proper-noun extraction
+    difficulty_detector— Easy / Medium / Hard classification
+    pdf_exporter       — FPDF2-based PDF generation
+    history_manager    — JSON-backed history CRUD
 """
 
-import os
-import json
-import re
-import anthropic
+import nltk
 
-from services import history_manager
+nltk.download("punkt", quiet=True)
+nltk.download("punkt_tab", quiet=True)
 
-# ── Client — key comes from environment variable, never hardcoded ─────────────
-_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+from services.model_loader import get_models
+from services import (
+    simplifier,
+    question_generator,
+    keyword_extractor,
+    difficulty_detector,
+    pdf_exporter,
+    history_manager,
+)
 
-SYSTEM_PROMPT = """You are an AI study assistant. When given a passage of text,
-you respond ONLY with a valid JSON object — no markdown, no explanation, no extra text.
+# ── Bootstrap: inject models into modules that need them ─────────────────────
+_nlp, _generator = get_models()
+simplifier.init(_nlp, _generator)
+question_generator.init(_generator)
+keyword_extractor.init(_nlp)
+# difficulty_detector and pdf_exporter are stateless — no init needed
 
-The JSON must have exactly these keys:
-{
-  "simplified": "<the text rewritten in plain simple language a student can understand>",
-  "questions": ["<question 1>", "<question 2>", "<question 3>", "<question 4>", "<question 5>"],
-  "keywords": ["<keyword1>", "<keyword2>", ...],
-  "difficulty": "<Easy|Medium|Hard>"
-}
-
-Rules:
-- simplified: rewrite in clear, short sentences. Keep all key facts.
-- questions: exactly 5 practice questions covering the main ideas.
-- keywords: 5–15 important nouns or concepts from the text, lowercase, sorted.
-- difficulty: Easy (< 12 avg words/sentence), Medium (12–19), Hard (20+).
-- Output ONLY the JSON. Any other output breaks the parser."""
-
-
-def analyze_text(text: str) -> dict:
-    """Send text to Claude API and return structured analysis."""
-    message = _client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": f"Analyze this text:\n\n{text}"}],
-    )
-
-    raw = message.content[0].text.strip()
-
-    # Strip accidental markdown fences if model adds them
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-
-    result = json.loads(raw)
-
-    # Validate / normalise keys so downstream code never breaks
-    result.setdefault("simplified", "")
-    result.setdefault("questions", [])
-    result.setdefault("keywords", [])
-    result.setdefault("difficulty", "Medium")
-
-    history_manager.save_history({"input": text, **result})
-    return result
-
-
-# ── Re-exports so main.py import surface stays unchanged ──────────────────────
+# ── Public re-exports (so main.py import surface doesn't change) ─────────────
+export_to_pdf = pdf_exporter.export_to_pdf
 get_history = history_manager.get_history
 save_history = history_manager.save_history
 delete_history_item = history_manager.delete_history_item
+
+
+# ── Main analysis entry point ─────────────────────────────────────────────────
+def analyze_text(text: str) -> dict:
+    """
+    Run all NLP tasks on *text* and persist the result to history.
+
+    Returns:
+        {
+            "simplified": str,
+            "questions":  list[str],
+            "keywords":   list[str],
+            "difficulty": str,
+        }
+    """
+    simplified = simplifier.simplify_text(text)
+    questions = question_generator.generate_questions(text)
+    keywords = keyword_extractor.extract_keywords(text)
+    difficulty = difficulty_detector.detect_difficulty(text)
+
+    result = {
+        "simplified": simplified,
+        "questions": questions,
+        "keywords": keywords,
+        "difficulty": difficulty,
+    }
+
+    history_manager.save_history({"input": text, **result})
+    return result
 </file>
 
 <file path="extension/content.js">
-// content.js — Smart Study Assistant v3.1
-// Edge Add-ons Store compliant — MV3, no eval, no inline scripts, no API keys.
-//
-// Architecture:
-//   User selects text → content.js fetch → Render backend → Claude API → results
-//
-// Edge compliance:
-//   - All network calls go only to the declared host_permission URL
-//   - No API keys in frontend code
-//   - AbortController timeout prevents hanging requests
-//   - All user content is XSS-sanitised before rendering
-//   - No localStorage (uses chrome.storage.local — declared permission)
-//   - No eval(), no new Function(), no innerHTML with raw user data
-//   - Graceful error messages for every failure mode
+// ===== Smart Study Assistant v3.1 — Blink & Double-Panel Fixed =====
+// Fixes:
+//   1. Double panel — guard so createPanel() truly runs only once ever
+//   2. Blink/disappear — append to document.body (not documentElement)
+//   3. Race condition — panel starts visible on first toggle, not hidden
 
 "use strict";
 
-// ─── Configuration ────────────────────────────────────────────────────────────
-// Only this URL is called — matches host_permissions in manifest.json exactly.
-const API_BASE = "https://smart-study-assistant-api.onrender.com";
+// ─── Constants ───────────────────────────────────────────────────────────────
+const API_BASE         = "http://127.0.0.1:8000";
+// No fetch timeout — accuracy over speed; let the model take as long as it needs.
 
-// Render free tier cold-starts can take ~10 s; Claude API adds ~3–5 s.
-// 45 s gives comfortable headroom without hanging forever.
-const TIMEOUT_MS = 45000;
+// ─── Module state ────────────────────────────────────────────────────────────
+let panel             = null;
+let historyCache      = [];
+let isAnalysisEnabled = false; // mirrors chrome.storage; default OFF
+let isAnalyzing       = false; // guard against concurrent requests
+let panelCreated      = false; // FIX: hard guard so we never create 2 panels
 
-// Minimum text selection length to trigger analysis.
-const MIN_CHARS = 20;
-
-// ─── Module-level state ───────────────────────────────────────────────────────
-let panel = null;              // The floating UI element (created once)
-let historyCache = [];         // In-memory cache for the History tab
-let isEnabled = false;         // Mirrors chrome.storage.local "analysisEnabled"
-let isAnalyzing = false;       // Guard: prevents overlapping API requests
-
-// ─── Boot: restore persisted toggle state ─────────────────────────────────────
-// Edge Store note: chrome.storage.local is the correct way to persist small
-// amounts of extension data. localStorage is NOT accessible from content scripts
-// in MV3. This is the correct pattern.
-chrome.storage.local.get(["analysisEnabled"], (result) => {
-  if (chrome.runtime.lastError) {
-    console.warn("[SSA] storage.get error:", chrome.runtime.lastError.message);
-    return;
-  }
-  isEnabled = result.analysisEnabled === true;
+// ─── Boot: read persisted toggle state ───────────────────────────────────────
+chrome.storage.local.get(["analysisEnabled"], (res) => {
+  isAnalysisEnabled = res.analysisEnabled === true;
+  console.log("[SSA] Boot — analysis enabled:", isAnalysisEnabled);
   if (panel) syncToggleUI();
 });
 
-// ─── Utility: XSS sanitiser ──────────────────────────────────────────────────
-// All user text and API response text passes through this before touching DOM.
-// Edge Store note: avoids innerHTML injection vulnerabilities.
-function sanitize(str) {
-  return String(str ?? "")
+// ─── Utility: plain fetch — no timeout (accuracy over speed) ─────────────────
+// The Flan-T5 model can be slow; we wait as long as it needs.
+async function fetchWithTimeout(url, options = {}) {
+  return fetch(url, options);
+}
+
+// ─── XSS guard ───────────────────────────────────────────────────────────────
+function escapeHtml(str) {
+  return String(str)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#x27;");
+    .replace(/"/g, "&quot;");
 }
 
-// ─── Utility: fetch with timeout ──────────────────────────────────────────────
-// Edge Store note: All requests go to a single, declared host. AbortController
-// ensures the UI never gets stuck in an infinite loading state.
-async function apiFetch(path, options = {}, timeoutMs = TIMEOUT_MS) {
-  const url = `${API_BASE}${path}`;
-  const controller = new AbortController();
-
-  const timer = setTimeout(() => {
-    controller.abort();
-  }, timeoutMs);
-
-  try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    return response;
-  } catch (err) {
-    clearTimeout(timer);
-    throw err; // re-throw; caller handles AbortError vs network error
-  }
-}
-
-// ─── Utility: validate API response shape ────────────────────────────────────
-// Edge Store note: validating before using prevents crashes from unexpected
-// server responses, which could otherwise cause confusing UI states.
-function isValidResult(obj) {
-  return (
-    obj !== null &&
-    typeof obj === "object" &&
-    typeof obj.simplified === "string" &&
-    Array.isArray(obj.questions) &&
-    Array.isArray(obj.keywords) &&
-    typeof obj.difficulty === "string"
-  );
-}
-
-// ─── Panel: create once, reuse forever ───────────────────────────────────────
+// ─── Panel factory ───────────────────────────────────────────────────────────
+// FIX: strict singleton — if panel already exists in DOM, just return it.
 function createPanel() {
-  if (panel) return panel;
+  // FIX 1: Check both our flag AND the actual DOM to handle edge cases
+  if (panelCreated && panel && document.getElementById("ssa-panel")) {
+    return panel;
+  }
 
-  // Inject scoped CSS first — no inline styles on elements (CSP-safe)
-  const styleEl = document.createElement("style");
-  styleEl.id = "ssa-styles";
-  styleEl.textContent = `
-    #ssa-panel {
-      all: initial;
-      position: fixed;
-      top: 60px;
-      right: 24px;
-      width: 380px;
-      max-height: 600px;
-      background: #0f1729;
-      border: 1px solid rgba(34,211,238,0.18);
-      border-radius: 14px;
-      box-shadow: 0 8px 40px rgba(0,0,0,0.55), 0 0 24px rgba(34,211,238,0.08);
-      z-index: 2147483647;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      font-size: 13px;
-      color: #e8edf5;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      resize: both;
-      min-width: 280px;
-      min-height: 220px;
-      box-sizing: border-box;
-    }
-    #ssa-panel * { box-sizing: border-box; }
-    #ssa-panel.ssa-hidden { display: none !important; }
-    #ssa-panel.ssa-minimized #ssa-body,
-    #ssa-panel.ssa-minimized #ssa-statusbar { display: none; }
-    #ssa-panel.ssa-minimized { max-height: unset; height: auto !important; resize: none; }
+  // FIX 2: If somehow a panel node exists in DOM but our variable is null, reuse it
+  const existing = document.getElementById("ssa-panel");
+  if (existing) {
+    panel = existing;
+    panelCreated = true;
+    return panel;
+  }
 
-    /* Header */
-    #ssa-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 10px 14px;
-      background: linear-gradient(180deg, rgba(34,211,238,0.07) 0%, transparent 100%);
-      border-bottom: 1px solid rgba(255,255,255,0.06);
-      cursor: grab;
-      user-select: none;
-      flex-shrink: 0;
-    }
-    #ssa-header.ssa-grabbing { cursor: grabbing; }
-    #ssa-logo {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 13px;
-      font-weight: 700;
-      color: #22d3ee;
-      letter-spacing: -0.3px;
-    }
-    #ssa-header-controls { display: flex; align-items: center; gap: 6px; }
+  panelCreated = true; // set before DOM work to block any re-entrant call
 
-    /* Toggle pill */
-    #ssa-toggle {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 10px 4px 8px;
-      border-radius: 20px;
-      border: 1.5px solid #374151;
-      background: #1e293b;
-      cursor: pointer;
-      font-size: 10px;
-      font-weight: 700;
-      font-family: inherit;
-      color: #64748b;
-      letter-spacing: 0.5px;
-      transition: border-color 0.2s, background 0.2s, color 0.2s;
-    }
-    #ssa-toggle-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: #374151;
-      transition: background 0.2s;
-      flex-shrink: 0;
-    }
-    #ssa-toggle.on {
-      border-color: rgba(34,197,94,0.55);
-      background: rgba(34,197,94,0.12);
-      color: #22c55e;
-    }
-    #ssa-toggle.on #ssa-toggle-dot { background: #22c55e; }
-
-    /* Icon buttons (minimize / close) */
-    .ssa-icon-btn {
-      width: 26px;
-      height: 26px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      border: none;
-      background: rgba(255,255,255,0.05);
-      color: #8b9bc0;
-      border-radius: 7px;
-      cursor: pointer;
-      font-size: 13px;
-      font-family: inherit;
-      line-height: 1;
-      transition: background 0.15s, color 0.15s;
-    }
-    .ssa-icon-btn:hover { background: rgba(255,255,255,0.1); color: #e8edf5; }
-
-    /* Status bar */
-    #ssa-statusbar {
-      font-size: 11px;
-      color: #64748b;
-      background: rgba(255,255,255,0.02);
-      border-bottom: 1px solid rgba(255,255,255,0.05);
-      padding: 5px 14px;
-      text-align: center;
-      flex-shrink: 0;
-      transition: color 0.2s, background 0.2s;
-    }
-    #ssa-statusbar.on {
-      color: #22c55e;
-      background: rgba(34,197,94,0.07);
-      border-bottom-color: rgba(34,197,94,0.18);
-    }
-
-    /* Body */
-    #ssa-body { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
-
-    /* Tabs */
-    #ssa-tabs {
-      display: flex;
-      gap: 3px;
-      padding: 10px 10px 0;
-      flex-shrink: 0;
-      flex-wrap: wrap;
-    }
-    .ssa-tab {
-      padding: 5px 9px;
-      font-size: 10.5px;
-      font-weight: 500;
-      color: #5a6a8a;
-      background: transparent;
-      border: 1px solid transparent;
-      border-radius: 7px;
-      cursor: pointer;
-      font-family: inherit;
-      transition: all 0.15s;
-    }
-    .ssa-tab:hover { color: #8b9bc0; background: #162039; }
-    .ssa-tab.active {
-      color: #22d3ee;
-      background: rgba(34,211,238,0.12);
-      border-color: rgba(34,211,238,0.2);
-    }
-
-    /* Content pane */
-    #ssa-content {
-      padding: 10px 14px;
-      flex: 1;
-      overflow-y: auto;
-      min-height: 80px;
-    }
-    #ssa-content::-webkit-scrollbar { width: 4px; }
-    #ssa-content::-webkit-scrollbar-thumb { background: #374151; border-radius: 2px; }
-
-    .ssa-pane { display: none; }
-    .ssa-pane.active { display: block; }
-
-    /* Content types */
-    .ssa-empty {
-      text-align: center;
-      color: #5a6a8a;
-      font-size: 12px;
-      padding: 36px 10px;
-      line-height: 1.7;
-    }
-    .ssa-loading {
-      text-align: center;
-      color: #22d3ee;
-      font-size: 12px;
-      padding: 36px 10px;
-    }
-    .ssa-spinner {
-      display: inline-block;
-      width: 14px;
-      height: 14px;
-      border: 2px solid rgba(34,211,238,0.2);
-      border-top-color: #22d3ee;
-      border-radius: 50%;
-      animation: ssa-spin 0.7s linear infinite;
-      vertical-align: middle;
-      margin-left: 8px;
-    }
-    @keyframes ssa-spin { to { transform: rotate(360deg); } }
-
-    .ssa-card {
-      font-size: 13px;
-      line-height: 1.65;
-      color: #e8edf5;
-      background: #162039;
-      border: 1px solid rgba(255,255,255,0.06);
-      border-radius: 10px;
-      padding: 12px;
-    }
-
-    .ssa-q-item {
-      display: flex;
-      align-items: flex-start;
-      gap: 8px;
-      padding: 8px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.06);
-    }
-    .ssa-q-item:last-child { border-bottom: none; }
-    .ssa-q-num {
-      flex-shrink: 0;
-      width: 20px;
-      height: 20px;
-      border-radius: 50%;
-      background: rgba(34,211,238,0.15);
-      color: #22d3ee;
-      font-size: 10px;
-      font-weight: 700;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .ssa-q-text { font-size: 12.5px; line-height: 1.5; color: #e8edf5; }
-
-    .ssa-kw-grid { display: flex; flex-wrap: wrap; gap: 6px; }
-    .ssa-kw-tag {
-      padding: 4px 10px;
-      font-size: 11px;
-      font-weight: 500;
-      font-family: monospace;
-      color: #22d3ee;
-      background: rgba(34,211,238,0.1);
-      border: 1px solid rgba(34,211,238,0.2);
-      border-radius: 20px;
-    }
-
-    .ssa-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 16px;
-      border-radius: 10px;
-      font-size: 14px;
-      font-weight: 600;
-    }
-    .ssa-badge-easy   { background: rgba(34,197,94,0.15); color: #22c55e; border: 1px solid rgba(34,197,94,0.3); }
-    .ssa-badge-medium { background: rgba(234,179,8,0.15); color: #eab308; border: 1px solid rgba(234,179,8,0.3); }
-    .ssa-badge-hard   { background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.3); }
-
-    .ssa-error-box {
-      font-size: 12px;
-      line-height: 1.65;
-      color: #fca5a5;
-      background: rgba(239,68,68,0.08);
-      border: 1px solid rgba(239,68,68,0.22);
-      border-radius: 10px;
-      padding: 14px 12px;
-    }
-    .ssa-error-title {
-      display: block;
-      margin-bottom: 5px;
-      font-size: 13px;
-      font-weight: 700;
-      color: #ef4444;
-    }
-    .ssa-mono {
-      background: rgba(255,255,255,0.08);
-      padding: 1px 5px;
-      border-radius: 4px;
-      font-family: monospace;
-      font-size: 11px;
-    }
-
-    /* History items */
-    .ssa-history-item {
-      background: #162039;
-      border: 1px solid rgba(255,255,255,0.06);
-      border-radius: 10px;
-      padding: 10px 12px;
-      margin-bottom: 8px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      transition: border-color 0.15s;
-    }
-    .ssa-history-item:hover { border-color: rgba(34,211,238,0.2); }
-    .ssa-history-content { flex: 1; cursor: pointer; min-width: 0; }
-    .ssa-history-text {
-      font-size: 11px;
-      color: #8b9bc0;
-      line-height: 1.4;
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
-    }
-    .ssa-history-meta { display: flex; gap: 6px; margin-top: 5px; }
-    .ssa-history-tag {
-      font-size: 9px;
-      padding: 2px 6px;
-      border-radius: 4px;
-      background: rgba(34,211,238,0.1);
-      color: #22d3ee;
-    }
-    .ssa-delete-btn {
-      flex-shrink: 0;
-      width: 28px;
-      height: 28px;
-      border: none;
-      background: rgba(239,68,68,0.1);
-      color: #ef4444;
-      border-radius: 6px;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: background 0.15s;
-    }
-    .ssa-delete-btn:hover { background: rgba(239,68,68,0.25); }
-
-    /* Footer actions */
-    #ssa-footer {
-      padding: 8px 14px 12px;
-      border-top: 1px solid rgba(255,255,255,0.06);
-      flex-shrink: 0;
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .ssa-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 7px 14px;
-      font-size: 11px;
-      font-weight: 600;
-      color: #22d3ee;
-      background: rgba(34,211,238,0.1);
-      border: 1px solid rgba(34,211,238,0.2);
-      border-radius: 8px;
-      cursor: pointer;
-      font-family: inherit;
-      transition: background 0.15s;
-    }
-    .ssa-btn:hover:not(:disabled) { background: rgba(34,211,238,0.2); }
-    .ssa-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  `;
-  document.documentElement.appendChild(styleEl);
-
-  // Build DOM
   panel = document.createElement("div");
   panel.id = "ssa-panel";
-  panel.setAttribute("role", "dialog");
-  panel.setAttribute("aria-label", "Smart Study Assistant");
-
   panel.innerHTML = `
     <div id="ssa-header">
-      <div id="ssa-logo">
-        <svg width="17" height="17" viewBox="0 0 24 24" fill="none"
-             stroke="currentColor" stroke-width="2"
-             stroke-linecap="round" stroke-linejoin="round"
-             aria-hidden="true">
+      <div id="ssa-header-left">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
           <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
         </svg>
         Study Assistant
       </div>
-      <div id="ssa-header-controls">
-        <button id="ssa-toggle" aria-pressed="false" title="Enable or disable AI text analysis">
+      <div id="ssa-header-right">
+        <button id="ssa-toggle" title="Enable / Disable AI Analysis" aria-pressed="false">
           <span id="ssa-toggle-dot"></span>
           <span id="ssa-toggle-label">OFF</span>
         </button>
-        <button class="ssa-icon-btn" id="ssa-minimize-btn" title="Minimize panel" aria-label="Minimize">&#8211;</button>
-        <button class="ssa-icon-btn" id="ssa-close-btn" title="Close panel" aria-label="Close">&#x2715;</button>
+        <button id="ssa-minimize" title="Minimize">&#8212;</button>
+        <button id="ssa-close"    title="Close">&#x2715;</button>
       </div>
     </div>
 
-    <div id="ssa-statusbar" role="status" aria-live="polite">
-      AI Analysis is <strong>OFF</strong> — click the toggle above to enable.
+    <div id="ssa-status-bar">
+      AI Analysis is <strong>OFF</strong>. Toggle above to enable.
     </div>
 
     <div id="ssa-body">
-      <div id="ssa-tabs" role="tablist">
-        <button class="ssa-tab active" data-tab="simplified" role="tab" aria-selected="true">Simplified</button>
-        <button class="ssa-tab" data-tab="questions" role="tab" aria-selected="false">Questions</button>
-        <button class="ssa-tab" data-tab="keywords" role="tab" aria-selected="false">Keywords</button>
-        <button class="ssa-tab" data-tab="difficulty" role="tab" aria-selected="false">Difficulty</button>
-        <button class="ssa-tab" data-tab="history" role="tab" aria-selected="false">History</button>
+      <div id="ssa-tabs">
+        <button class="ssa-tab ssa-tab-active" data-tab="simplified">Simplified</button>
+        <button class="ssa-tab" data-tab="questions">Questions</button>
+        <button class="ssa-tab" data-tab="keywords">Keywords</button>
+        <button class="ssa-tab" data-tab="difficulty">Difficulty</button>
+        <button class="ssa-tab" data-tab="history">History</button>
       </div>
-
       <div id="ssa-content">
-        <div class="ssa-pane active" id="ssa-pane-simplified" role="tabpanel">
-          <div class="ssa-empty">Enable AI Analysis above,<br>then select any text on the page.</div>
+        <div id="ssa-simplified" class="ssa-panel-section ssa-panel-active">
+          <div class="ssa-empty">Enable AI Analysis above, then select any text (20+ chars) on the page.</div>
         </div>
-        <div class="ssa-pane" id="ssa-pane-questions" role="tabpanel">
+        <div id="ssa-questions" class="ssa-panel-section">
           <div class="ssa-empty">Questions will appear here after analysis.</div>
         </div>
-        <div class="ssa-pane" id="ssa-pane-keywords" role="tabpanel">
+        <div id="ssa-keywords" class="ssa-panel-section">
           <div class="ssa-empty">Keywords will appear here after analysis.</div>
         </div>
-        <div class="ssa-pane" id="ssa-pane-difficulty" role="tabpanel">
+        <div id="ssa-difficulty" class="ssa-panel-section">
           <div class="ssa-empty">Difficulty level will appear here after analysis.</div>
         </div>
-        <div class="ssa-pane" id="ssa-pane-history" role="tabpanel">
+        <div id="ssa-history" class="ssa-panel-section">
           <div class="ssa-empty">No history yet.</div>
         </div>
       </div>
-
-      <div id="ssa-footer">
-        <button class="ssa-btn" id="ssa-back-btn" style="display:none;" aria-label="Back to history list">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2.5"
-               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <div id="ssa-actions">
+        <button id="ssa-back-btn" class="ssa-action-btn" style="display:none;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
-          Back
+          Back to History
         </button>
-        <button class="ssa-btn" id="ssa-pdf-btn" disabled aria-label="Export analysis as PDF">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2"
-               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <button id="ssa-export-pdf" class="ssa-action-btn" title="Export as PDF" disabled>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
             <polyline points="7 10 12 15 17 10"/>
             <line x1="12" y1="15" x2="12" y2="3"/>
@@ -1696,461 +1418,536 @@ function createPanel() {
     </div>
   `;
 
-  document.documentElement.appendChild(panel);
+  // ── Styles ──────────────────────────────────────────────────────────────────
+  const style = document.createElement("style");
+  style.id = "ssa-styles"; // ID so we never inject twice
+  style.textContent = `
+    #ssa-panel {
+      position: fixed; top: 60px; right: 24px; width: 380px; max-height: 580px;
+      background: #0f1729; border: 1px solid rgba(34,211,238,0.15); border-radius: 14px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.5), 0 0 20px rgba(34,211,238,0.08);
+      z-index: 2147483647;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      color: #e8edf5; overflow: hidden; display: flex; flex-direction: column;
+      transition: box-shadow 0.2s; resize: both; min-width: 280px; min-height: 200px;
+    }
+    #ssa-panel.ssa-minimized #ssa-body,
+    #ssa-panel.ssa-minimized #ssa-status-bar { display: none; }
+    #ssa-panel.ssa-minimized { max-height: none; height: auto !important; resize: none; }
+    #ssa-panel.ssa-dragging  { box-shadow: 0 12px 48px rgba(0,0,0,0.6), 0 0 30px rgba(34,211,238,0.15); cursor: grabbing; }
 
-  // ── Wire up drag ────────────────────────────────────────────────────────────
-  let dragging = false, dx = 0, dy = 0;
+    #ssa-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px;
+      background: linear-gradient(180deg, rgba(34,211,238,0.06) 0%, transparent 100%);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      cursor: grab; user-select: none; flex-shrink: 0;
+    }
+    #ssa-header:active { cursor: grabbing; }
+    #ssa-header-left {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 13px; font-weight: 700; letter-spacing: -0.3px; color: #22d3ee;
+    }
+    #ssa-header-right { display: flex; align-items: center; gap: 6px; }
+
+    #ssa-minimize, #ssa-close {
+      width: 24px; height: 24px; border: none; background: rgba(255,255,255,0.05);
+      color: #8b9bc0; border-radius: 6px; cursor: pointer; font-size: 12px;
+      display: flex; align-items: center; justify-content: center; transition: all 0.15s;
+    }
+    #ssa-minimize:hover, #ssa-close:hover { background: rgba(255,255,255,0.1); color: #e8edf5; }
+
+    /* ── Toggle button ── */
+    #ssa-toggle {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 4px 10px 4px 8px; border-radius: 20px;
+      border: 1.5px solid #374151; background: #1e293b;
+      cursor: pointer; font-size: 10px; font-weight: 700;
+      font-family: inherit; letter-spacing: 0.5px;
+      color: #64748b; transition: all 0.2s; user-select: none;
+    }
+    #ssa-toggle-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #374151; flex-shrink: 0; transition: background 0.2s;
+    }
+    #ssa-toggle.ssa-toggle-on {
+      border-color: rgba(34,197,94,0.5); background: rgba(34,197,94,0.12); color: #22c55e;
+    }
+    #ssa-toggle.ssa-toggle-on #ssa-toggle-dot { background: #22c55e; }
+
+    /* ── Status bar ── */
+    #ssa-status-bar {
+      font-size: 11px; color: #64748b;
+      background: rgba(255,255,255,0.02);
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      padding: 5px 14px; text-align: center; flex-shrink: 0;
+    }
+    #ssa-status-bar.ssa-status-on {
+      color: #22c55e; background: rgba(34,197,94,0.06);
+      border-bottom-color: rgba(34,197,94,0.15);
+    }
+
+    #ssa-body { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+
+    #ssa-tabs { display: flex; gap: 3px; padding: 10px 10px 0; flex-shrink: 0; flex-wrap: wrap; }
+    .ssa-tab {
+      padding: 6px 8px; font-size: 10.5px; font-weight: 500; color: #5a6a8a;
+      background: transparent; border: 1px solid transparent; border-radius: 7px;
+      cursor: pointer; transition: all 0.15s; font-family: inherit;
+    }
+    .ssa-tab:hover { color: #8b9bc0; background: #162039; }
+    .ssa-tab-active { color: #22d3ee !important; background: rgba(34,211,238,0.12) !important; border-color: rgba(34,211,238,0.2) !important; }
+
+    #ssa-content { padding: 10px 14px; flex: 1; overflow-y: auto; min-height: 80px; }
+    #ssa-content::-webkit-scrollbar { width: 4px; }
+    #ssa-content::-webkit-scrollbar-thumb { background: #5a6a8a; border-radius: 2px; }
+    #ssa-content::-webkit-scrollbar-track { background: transparent; }
+
+    .ssa-panel-section { display: none; }
+    .ssa-panel-section.ssa-panel-active { display: block; }
+
+    .ssa-empty { text-align: center; color: #5a6a8a; font-size: 12px; padding: 36px 10px; line-height: 1.7; }
+
+    .ssa-text { font-size: 13px; line-height: 1.65; color: #e8edf5; background: #162039; border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 12px; }
+
+    .ssa-q-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .ssa-q-item:last-child { border-bottom: none; }
+    .ssa-q-num { flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%; background: rgba(34,211,238,0.15); color: #22d3ee; font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+    .ssa-q-text { font-size: 12.5px; line-height: 1.5; color: #e8edf5; }
+
+    .ssa-kw-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+    .ssa-kw-tag { padding: 4px 10px; font-size: 11px; font-weight: 500; font-family: monospace; color: #22d3ee; background: rgba(34,211,238,0.12); border: 1px solid rgba(34,211,238,0.2); border-radius: 20px; }
+
+    .ssa-difficulty-badge { display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 10px; font-size: 14px; font-weight: 600; }
+    .ssa-difficulty-easy   { background: rgba(34,197,94,0.15); color: #22c55e; border: 1px solid rgba(34,197,94,0.3); }
+    .ssa-difficulty-medium { background: rgba(234,179,8,0.15); color: #eab308; border: 1px solid rgba(234,179,8,0.3); }
+    .ssa-difficulty-hard   { background: rgba(239,68,68,0.15); color: #ef4444; border: 1px solid rgba(239,68,68,0.3); }
+
+    .ssa-error {
+      font-size: 12px; line-height: 1.65; color: #fca5a5;
+      background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2);
+      border-radius: 10px; padding: 14px 12px;
+    }
+    .ssa-error strong { display: block; margin-bottom: 6px; font-size: 13px; color: #ef4444; }
+    .ssa-error code { background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+
+    .ssa-history-item { background: #162039; border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; transition: all 0.15s; }
+    .ssa-history-item:hover { border-color: rgba(34,211,238,0.2); }
+    .ssa-history-item-content { flex: 1; cursor: pointer; min-width: 0; }
+    .ssa-history-text { font-size: 11px; color: #8b9bc0; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .ssa-history-meta { display: flex; gap: 8px; margin-top: 6px; }
+    .ssa-history-tag { font-size: 9px; padding: 2px 6px; border-radius: 4px; background: rgba(34,211,238,0.1); color: #22d3ee; }
+    .ssa-history-delete { flex-shrink: 0; width: 28px; height: 28px; border: none; background: rgba(239,68,68,0.1); color: #ef4444; border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
+    .ssa-history-delete:hover { background: rgba(239,68,68,0.25); color: #f87171; }
+
+    #ssa-actions { padding: 8px 14px 12px; border-top: 1px solid rgba(255,255,255,0.06); flex-shrink: 0; display: flex; gap: 8px; flex-wrap: wrap; }
+    .ssa-action-btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; font-size: 11px; font-weight: 600; color: #22d3ee; background: rgba(34,211,238,0.1); border: 1px solid rgba(34,211,238,0.2); border-radius: 8px; cursor: pointer; transition: all 0.15s; font-family: inherit; }
+    .ssa-action-btn:hover:not(:disabled) { background: rgba(34,211,238,0.2); }
+    .ssa-action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .ssa-loading { text-align: center; color: #22d3ee; font-size: 12px; padding: 30px 10px; }
+    .ssa-loading::after {
+      content: ''; display: inline-block; width: 14px; height: 14px;
+      border: 2px solid rgba(34,211,238,0.25); border-top-color: #22d3ee;
+      border-radius: 50%; animation: ssa-spin 0.7s linear infinite;
+      margin-left: 8px; vertical-align: middle;
+    }
+    @keyframes ssa-spin { to { transform: rotate(360deg); } }
+  `;
+
+  // FIX: Inject style only if not already present
+  if (!document.getElementById("ssa-styles")) {
+    document.head.appendChild(style);
+  }
+
+  // FIX: Append to body (not documentElement) — safer, less conflict with page CSS
+  document.body.appendChild(panel);
+
+  // ── Drag logic ──────────────────────────────────────────────────────────────
+  let isDragging = false, offsetX = 0, offsetY = 0;
   const header = panel.querySelector("#ssa-header");
-
   header.addEventListener("mousedown", (e) => {
     if (e.target.closest("button")) return;
-    dragging = true;
+    isDragging = true;
     const rect = panel.getBoundingClientRect();
-    dx = e.clientX - rect.left;
-    dy = e.clientY - rect.top;
-    header.classList.add("ssa-grabbing");
+    offsetX = e.clientX - rect.left;
+    offsetY = e.clientY - rect.top;
+    panel.classList.add("ssa-dragging");
     e.preventDefault();
   });
   document.addEventListener("mousemove", (e) => {
-    if (!dragging) return;
-    const x = Math.max(0, Math.min(window.innerWidth - 60, e.clientX - dx));
-    const y = Math.max(0, Math.min(window.innerHeight - 40, e.clientY - dy));
-    panel.style.left = x + "px";
-    panel.style.top = y + "px";
+    if (!isDragging) return;
+    const x = Math.max(0, Math.min(window.innerWidth  - 100, e.clientX - offsetX));
+    const y = Math.max(0, Math.min(window.innerHeight - 50,  e.clientY - offsetY));
+    panel.style.left  = x + "px";
+    panel.style.top   = y + "px";
     panel.style.right = "auto";
   });
   document.addEventListener("mouseup", () => {
-    if (dragging) { dragging = false; header.classList.remove("ssa-grabbing"); }
+    if (isDragging) { isDragging = false; panel.classList.remove("ssa-dragging"); }
   });
 
-  // ── Wire up controls ────────────────────────────────────────────────────────
-  panel.querySelector("#ssa-minimize-btn").addEventListener("click", () => {
-    panel.classList.toggle("ssa-minimized");
-  });
-
-  panel.querySelector("#ssa-close-btn").addEventListener("click", () => {
-    panel.classList.add("ssa-hidden");
-  });
-
-  panel.querySelector("#ssa-toggle").addEventListener("click", (e) => {
-    e.stopPropagation();
-    isEnabled = !isEnabled;
-    chrome.storage.local.set({ analysisEnabled: isEnabled });
-    syncToggleUI();
-  });
-
-  // ── Wire up tabs ────────────────────────────────────────────────────────────
-  panel.querySelectorAll(".ssa-tab").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      switchTab(btn.dataset.tab);
+  // ── Tab switching ────────────────────────────────────────────────────────────
+  panel.querySelectorAll(".ssa-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      panel.querySelectorAll(".ssa-tab").forEach((t) => t.classList.remove("ssa-tab-active"));
+      panel.querySelectorAll(".ssa-panel-section").forEach((s) => s.classList.remove("ssa-panel-active"));
+      tab.classList.add("ssa-tab-active");
+      panel.querySelector(`#ssa-${tab.dataset.tab}`).classList.add("ssa-panel-active");
       panel.querySelector("#ssa-back-btn").style.display = "none";
     });
   });
 
+  // ── History tab click ────────────────────────────────────────────────────────
   panel.querySelector('[data-tab="history"]').addEventListener("click", loadHistory);
 
-  // ── Wire up footer buttons ──────────────────────────────────────────────────
-  panel.querySelector("#ssa-back-btn").addEventListener("click", () => {
-    panel.querySelector("#ssa-back-btn").style.display = "none";
-    switchTab("history");
-    loadHistory();
+  // ── Minimize / Close ─────────────────────────────────────────────────────────
+  panel.querySelector("#ssa-minimize").addEventListener("click", () => panel.classList.toggle("ssa-minimized"));
+  panel.querySelector("#ssa-close").addEventListener("click",    () => hidePanel());
+
+  // ── ON/OFF Toggle ─────────────────────────────────────────────────────────────
+  panel.querySelector("#ssa-toggle").addEventListener("click", (e) => {
+    e.stopPropagation();
+    isAnalysisEnabled = !isAnalysisEnabled;
+    chrome.storage.local.set({ analysisEnabled: isAnalysisEnabled });
+    console.log("[SSA] Toggle →", isAnalysisEnabled ? "ON" : "OFF");
+    syncToggleUI();
   });
 
-  panel.querySelector("#ssa-pdf-btn").addEventListener("click", exportPdf);
+  // ── Export PDF ───────────────────────────────────────────────────────────────
+  panel.querySelector("#ssa-export-pdf").addEventListener("click", async () => {
+    const stored = await new Promise((r) => chrome.storage.local.get(["analysis"], r));
+    const analysis = stored.analysis;
+    if (!analysis) { showInlineError("No analysis data to export yet."); return; }
+
+    try {
+      const resp = await fetchWithTimeout(
+        `${API_BASE}/export-pdf`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            simplified: analysis.simplified || "",
+            questions:  analysis.questions  || [],
+            keywords:   analysis.keywords   || [],
+            difficulty: analysis.difficulty || ""
+          })
+        });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href = url; a.download = "study_output.pdf"; a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("[SSA] PDF export error:", err);
+      showInlineError("Could not export PDF — is the backend running?");
+    }
+  });
+
+  // ── Back button ──────────────────────────────────────────────────────────────
+  panel.querySelector("#ssa-back-btn").addEventListener("click", () => {
+    panel.querySelector("#ssa-back-btn").style.display = "none";
+    switchToTab("history");
+    loadHistory();
+  });
 
   syncToggleUI();
   return panel;
 }
 
-// ─── Toggle UI sync ───────────────────────────────────────────────────────────
+// ─── Toggle UI sync ──────────────────────────────────────────────────────────
 function syncToggleUI() {
   if (!panel) return;
-  const toggle = panel.querySelector("#ssa-toggle");
-  const label = panel.querySelector("#ssa-toggle-label");
-  const bar = panel.querySelector("#ssa-statusbar");
+  const btn    = panel.querySelector("#ssa-toggle");
+  const label  = panel.querySelector("#ssa-toggle-label");
+  const status = panel.querySelector("#ssa-status-bar");
 
-  if (isEnabled) {
-    toggle.classList.add("on");
-    toggle.setAttribute("aria-pressed", "true");
-    label.textContent = "ON";
-    bar.innerHTML = "AI Analysis is <strong>ON</strong> — select any text to analyze.";
-    bar.classList.add("on");
+  if (isAnalysisEnabled) {
+    btn.classList.add("ssa-toggle-on");
+    btn.setAttribute("aria-pressed", "true");
+    label.textContent    = "ON";
+    status.innerHTML     = "AI Analysis is <strong>ON</strong> — select any text to analyze.";
+    status.classList.add("ssa-status-on");
   } else {
-    toggle.classList.remove("on");
-    toggle.setAttribute("aria-pressed", "false");
-    label.textContent = "OFF";
-    bar.innerHTML = "AI Analysis is <strong>OFF</strong> — click the toggle above to enable.";
-    bar.classList.remove("on");
+    btn.classList.remove("ssa-toggle-on");
+    btn.setAttribute("aria-pressed", "false");
+    label.textContent       = "OFF";
+    status.innerHTML        = "AI Analysis is <strong>OFF</strong>. Toggle above to enable.";
+    status.classList.remove("ssa-status-on");
   }
 }
 
-// ─── Tab switching ────────────────────────────────────────────────────────────
-function switchTab(name) {
+// ─── Tab helper ──────────────────────────────────────────────────────────────
+function switchToTab(tabName) {
   if (!panel) return;
-  panel.querySelectorAll(".ssa-tab").forEach((t) => {
-    const active = t.dataset.tab === name;
-    t.classList.toggle("active", active);
-    t.setAttribute("aria-selected", String(active));
-  });
-  panel.querySelectorAll(".ssa-pane").forEach((p) => {
-    p.classList.toggle("active", p.id === `ssa-pane-${name}`);
-  });
+  panel.querySelectorAll(".ssa-tab").forEach((t) => t.classList.remove("ssa-tab-active"));
+  panel.querySelectorAll(".ssa-panel-section").forEach((s) => s.classList.remove("ssa-panel-active"));
+  const tab = panel.querySelector(`[data-tab="${tabName}"]`);
+  if (tab) tab.classList.add("ssa-tab-active");
+  const sec = panel.querySelector(`#ssa-${tabName}`);
+  if (sec) sec.classList.add("ssa-panel-active");
 }
 
-// ─── Loading state ────────────────────────────────────────────────────────────
-// Edge Store note: The UI must always show either results or an error.
-// Loading spinners with no exit path are a common rejection reason.
+// ─── Inline error (non-blocking, inside panel) ───────────────────────────────
+function showInlineError(msg) {
+  const p = createPanel();
+  p.querySelector("#ssa-simplified").innerHTML =
+    `<div class="ssa-error"><strong>Notice</strong>${escapeHtml(msg)}</div>`;
+  switchToTab("simplified");
+}
+
+// ─── Loading state ───────────────────────────────────────────────────────────
 function showLoading() {
   const p = createPanel();
-  p.classList.remove("ssa-hidden");
-  const spinnerHtml = (msg) =>
-    `<div class="ssa-loading">${sanitize(msg)}<span class="ssa-spinner" aria-hidden="true"></span></div>`;
-
-  ["simplified", "questions", "keywords", "difficulty"].forEach((tab) => {
-    const labels = {
-      simplified: "Simplifying text",
-      questions:  "Generating questions",
-      keywords:   "Extracting keywords",
-      difficulty: "Detecting difficulty",
-    };
-    p.querySelector(`#ssa-pane-${tab}`).innerHTML = spinnerHtml(labels[tab]);
+  p.style.display = "flex";
+  const msgs = {
+    simplified: "Simplifying text…",
+    questions:  "Generating questions…",
+    keywords:   "Extracting keywords…",
+    difficulty: "Detecting difficulty…"
+  };
+  Object.entries(msgs).forEach(([tab, msg]) => {
+    p.querySelector(`#ssa-${tab}`).innerHTML = `<div class="ssa-loading">${msg}</div>`;
   });
-
-  p.querySelector("#ssa-pdf-btn").disabled = true;
+  p.querySelector("#ssa-export-pdf").disabled = true;
   p.querySelector("#ssa-back-btn").style.display = "none";
-  switchTab("simplified");
+  switchToTab("simplified");
 }
 
-// ─── Error state ──────────────────────────────────────────────────────────────
-// Four named error types with clear human-readable messages for reviewers.
+// ─── Error states — always escape infinite loading ───────────────────────────
 function showError(type) {
   const p = createPanel();
-
-  const messages = {
+  const msgs = {
     network: {
-      title: "Cannot Reach Server",
-      body: "The analysis server is not responding. This may be a temporary issue — please try again in a moment.",
-    },
-    timeout: {
-      title: "Request Timed Out",
-      body: "The server took too long to respond. Try selecting a shorter passage of text.",
+      title: "Backend Offline",
+      body:  "Cannot reach <code>127.0.0.1:8000</code>.<br>Run: <code>uvicorn main:app --reload --host 127.0.0.1 --port 8000</code>"
     },
     parse: {
       title: "Unexpected Response",
-      body: "The server returned an unexpected response. Please try again.",
-    },
-    server: {
-      title: "Server Error",
-      body: "The analysis server returned an error. Please try again shortly.",
+      body:  "Server returned unreadable data.<br>Check the backend console for Python errors."
     },
     unknown: {
       title: "Something Went Wrong",
-      body: "An unexpected error occurred. Please try again.",
-    },
+      body:  "An unexpected error occurred. Open DevTools (F12) → Console for details."
+    }
   };
+  const { title, body } = msgs[type] || msgs.unknown;
+  const html = `<div class="ssa-error"><strong>${title}</strong>${body}</div>`;
 
-  const { title, body } = messages[type] ?? messages.unknown;
-  const html = `
-    <div class="ssa-error-box" role="alert">
-      <span class="ssa-error-title">${sanitize(title)}</span>
-      ${sanitize(body)}
-    </div>`;
-
-  // Populate ALL panes — no pane is left showing a spinner
   ["simplified", "questions", "keywords", "difficulty"].forEach((tab) => {
-    p.querySelector(`#ssa-pane-${tab}`).innerHTML = html;
+    p.querySelector(`#ssa-${tab}`).innerHTML = html;
   });
-
-  p.querySelector("#ssa-pdf-btn").disabled = true;
-  switchTab("simplified");
+  p.querySelector("#ssa-export-pdf").disabled = true;
+  switchToTab("simplified");
 }
 
-// ─── Render results ───────────────────────────────────────────────────────────
+// ─── Result renderer ─────────────────────────────────────────────────────────
 function showResults(result) {
   const p = createPanel();
 
-  // Simplified text
-  p.querySelector("#ssa-pane-simplified").innerHTML = result.simplified
-    ? `<div class="ssa-card">${sanitize(result.simplified)}</div>`
+  p.querySelector("#ssa-simplified").innerHTML = result.simplified
+    ? `<div class="ssa-text">${escapeHtml(result.simplified)}</div>`
     : `<div class="ssa-empty">No simplified text returned.</div>`;
 
-  // Questions
-  if (result.questions.length) {
-    p.querySelector("#ssa-pane-questions").innerHTML = result.questions
-      .map((q, i) => `
-        <div class="ssa-q-item">
-          <div class="ssa-q-num" aria-hidden="true">${i + 1}</div>
-          <div class="ssa-q-text">${sanitize(q)}</div>
-        </div>`)
+  if (result.questions && result.questions.length) {
+    p.querySelector("#ssa-questions").innerHTML = result.questions
+      .map((q, i) => `<div class="ssa-q-item"><div class="ssa-q-num">${i + 1}</div><div class="ssa-q-text">${escapeHtml(q)}</div></div>`)
       .join("");
   } else {
-    p.querySelector("#ssa-pane-questions").innerHTML =
-      `<div class="ssa-empty">No questions were generated.</div>`;
+    p.querySelector("#ssa-questions").innerHTML = `<div class="ssa-empty">No questions generated.</div>`;
   }
 
-  // Keywords
-  if (result.keywords.length) {
-    p.querySelector("#ssa-pane-keywords").innerHTML =
-      `<div class="ssa-kw-grid">${
-        result.keywords.map((k) => `<span class="ssa-kw-tag">${sanitize(k)}</span>`).join("")
-      }</div>`;
+  if (result.keywords && result.keywords.length) {
+    p.querySelector("#ssa-keywords").innerHTML =
+      `<div class="ssa-kw-grid">${result.keywords.map(k => `<span class="ssa-kw-tag">${escapeHtml(k)}</span>`).join("")}</div>`;
   } else {
-    p.querySelector("#ssa-pane-keywords").innerHTML =
-      `<div class="ssa-empty">No keywords were found.</div>`;
+    p.querySelector("#ssa-keywords").innerHTML = `<div class="ssa-empty">No keywords found.</div>`;
   }
 
-  // Difficulty
-  const level = (result.difficulty ?? "").toLowerCase();
-  const icons = { easy: "🟢", medium: "🟡", hard: "🔴" };
-  const icon = icons[level] ?? "⚪";
-  const badgeClass = ["easy", "medium", "hard"].includes(level)
-    ? `ssa-badge-${level}` : "";
-  p.querySelector("#ssa-pane-difficulty").innerHTML =
-    `<div class="ssa-badge ${badgeClass}" role="status">
-       ${icon} ${sanitize(result.difficulty)}
-     </div>`;
+  if (result.difficulty) {
+    const level = result.difficulty.toLowerCase();
+    const icon  = level === "easy" ? "🟢" : level === "medium" ? "🟡" : "🔴";
+    p.querySelector("#ssa-difficulty").innerHTML =
+      `<div class="ssa-difficulty-badge ssa-difficulty-${level}">${icon} ${escapeHtml(result.difficulty)}</div>`;
+  } else {
+    p.querySelector("#ssa-difficulty").innerHTML = `<div class="ssa-empty">No difficulty data.</div>`;
+  }
 
-  p.querySelector("#ssa-pdf-btn").disabled = false;
-  switchTab("simplified");
+  p.querySelector("#ssa-export-pdf").disabled = false;
+  switchToTab("simplified");
 }
 
-// ─── History ──────────────────────────────────────────────────────────────────
+// ─── History ─────────────────────────────────────────────────────────────────
 async function loadHistory() {
-  const p = createPanel();
-  const container = p.querySelector("#ssa-pane-history");
-  container.innerHTML =
-    `<div class="ssa-loading">Loading history<span class="ssa-spinner" aria-hidden="true"></span></div>`;
+  const p         = createPanel();
+  const container = p.querySelector("#ssa-history");
+  container.innerHTML = '<div class="ssa-loading">Loading history</div>';
 
   try {
-    const resp = await apiFetch("/history", {}, 10000);
-    if (!resp.ok) throw new Error(`HTTP_${resp.status}`);
+    const resp = await fetchWithTimeout(`${API_BASE}/history`, {});
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const items = await resp.json();
-    historyCache = Array.isArray(items) ? items : [];
+    historyCache = items;
 
-    if (!historyCache.length) {
-      container.innerHTML =
-        `<div class="ssa-empty">No history yet.<br>Analyse some text to get started.</div>`;
+    if (!items.length) {
+      container.innerHTML = '<div class="ssa-empty">No history yet.<br>Analyze some text to get started.</div>';
       return;
     }
 
-    container.innerHTML = historyCache
-      .map((item, i) => `
-        <div class="ssa-history-item" data-index="${i}">
-          <div class="ssa-history-content">
-            <div class="ssa-history-text">${sanitize((item.input ?? "").slice(0, 120))}</div>
-            <div class="ssa-history-meta">
-              <span class="ssa-history-tag">${sanitize(item.difficulty ?? "?")}</span>
-              <span class="ssa-history-tag">${(item.keywords ?? []).length} keywords</span>
-            </div>
+    container.innerHTML = items.map((item, i) => `
+      <div class="ssa-history-item" data-index="${i}">
+        <div class="ssa-history-item-content">
+          <div class="ssa-history-text">${escapeHtml((item.input || item.text || "").slice(0, 120))}</div>
+          <div class="ssa-history-meta">
+            <span class="ssa-history-tag">${escapeHtml(item.difficulty || "?")}</span>
+            <span class="ssa-history-tag">${(item.keywords || []).length} keywords</span>
           </div>
-          <button class="ssa-delete-btn" data-index="${i}" aria-label="Delete this history entry">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2"
-                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <polyline points="3 6 5 6 21 6"/>
-              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-              <line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>
-            </svg>
-          </button>
-        </div>`)
-      .join("");
+        </div>
+        <button class="ssa-history-delete" data-delete-index="${i}" title="Delete">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"/>
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+            <line x1="10" y1="11" x2="10" y2="17"/>
+            <line x1="14" y1="11" x2="14" y2="17"/>
+          </svg>
+        </button>
+      </div>
+    `).join("");
 
-    // Item click → open detail view
-    container.querySelectorAll(".ssa-history-content").forEach((el) => {
+    container.querySelectorAll(".ssa-history-item-content").forEach((el) => {
       el.addEventListener("click", () => {
         const idx = parseInt(el.closest("[data-index]").dataset.index, 10);
-        const item = historyCache[idx];
-        if (!item) return;
-        chrome.storage.local.set({ analysis: item });
-        showResults(item);
-        p.querySelector("#ssa-back-btn").style.display = "inline-flex";
-        p.querySelector("#ssa-pdf-btn").disabled = false;
+        openHistoryDetail(historyCache[idx]);
       });
     });
-
-    // Delete button
-    container.querySelectorAll(".ssa-delete-btn").forEach((btn) => {
+    container.querySelectorAll(".ssa-history-delete").forEach((btn) => {
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
-        const idx = parseInt(btn.dataset.index, 10);
-        deleteHistoryEntry(idx);
+        deleteHistoryItem(parseInt(btn.dataset.deleteIndex, 10));
       });
     });
 
   } catch (err) {
-    const isTimeout = err.name === "AbortError";
-    container.innerHTML = `
-      <div class="ssa-error-box" role="alert">
-        <span class="ssa-error-title">${isTimeout ? "Request Timed Out" : "Cannot Reach Server"}</span>
-        Could not load history. Check your connection and try again.
-      </div>`;
+    console.error("[SSA] loadHistory error:", err);
+    container.innerHTML =
+      '<div class="ssa-error"><strong>Backend Offline</strong>Start the server to view history.</div>';
   }
 }
 
-async function deleteHistoryEntry(index) {
+async function deleteHistoryItem(index) {
   try {
-    const resp = await apiFetch(`/history/${index}`, { method: "DELETE" }, 8000);
-    if (!resp.ok) throw new Error(`HTTP_${resp.status}`);
+    const resp = await fetchWithTimeout(`${API_BASE}/history/${index}`, { method: "DELETE" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     loadHistory();
-  } catch {
-    // Non-critical failure — show the history tab with a soft error
-    const p = createPanel();
-    p.querySelector("#ssa-pane-history").innerHTML = `
-      <div class="ssa-error-box" role="alert">
-        <span class="ssa-error-title">Delete Failed</span>
-        Could not delete the entry. Please try again.
-      </div>`;
+  } catch (err) {
+    console.error("[SSA] Delete error:", err);
+    showInlineError("Could not delete — is the backend running?");
   }
 }
 
-// ─── PDF export ───────────────────────────────────────────────────────────────
-async function exportPdf() {
-  const stored = await new Promise((resolve) => {
-    chrome.storage.local.get(["analysis"], resolve);
-  });
+function openHistoryDetail(item) {
+  const p = createPanel();
+  chrome.storage.local.set({ analysis: item, currentText: item.input || item.text || "" });
+  showResults(item);
+  p.querySelector("#ssa-back-btn").style.display = "inline-flex";
+  p.querySelector("#ssa-export-pdf").disabled = false;
+}
 
-  const analysis = stored.analysis;
-  if (!analysis || !isValidResult(analysis)) {
-    createPanel()
-      .querySelector("#ssa-pane-simplified").innerHTML = `
-        <div class="ssa-error-box" role="alert">
-          <span class="ssa-error-title">Nothing to Export</span>
-          Analyse some text first, then export.
-        </div>`;
-    switchTab("simplified");
+// ─── Extension icon → toggle / show panel ────────────────────────────────────
+let panelVisible = false;
+
+function showPanel() {
+  const p = createPanel();
+  p.style.display = "flex";
+  panelVisible = true;
+  syncToggleUI();
+}
+
+function hidePanel() {
+  if (!panel) return;
+  panel.style.display = "none";
+  panelVisible = false;
+}
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.action === "toggle-panel") {
+    if (panelVisible) {
+      hidePanel();
+    } else {
+      showPanel();
+    }
+  } else if (msg.action === "show-panel") {
+    showPanel();
+  }
+});
+
+// ─── Core: text selection → analysis ─────────────────────────────────────────
+document.addEventListener("mouseup", async (e) => {
+  if (e.target.closest && e.target.closest("#ssa-panel")) return;
+  if (!isAnalysisEnabled) {
+    console.log("[SSA] Skipped — analysis is OFF");
+    return;
+  }
+  if (isAnalyzing) {
+    console.log("[SSA] Skipped — request already in flight");
     return;
   }
 
-  const pdfBtn = createPanel().querySelector("#ssa-pdf-btn");
-  pdfBtn.disabled = true;
-  pdfBtn.textContent = "Generating…";
+  let selectedText = window.getSelection()?.toString() ?? "";
 
-  try {
-    const resp = await apiFetch(
-      "/export-pdf",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          simplified: analysis.simplified ?? "",
-          questions:  analysis.questions  ?? [],
-          keywords:   analysis.keywords   ?? [],
-          difficulty: analysis.difficulty ?? "",
-        }),
-      },
-      20000
-    );
+  selectedText = selectedText
+    .replace(/AI Analysis is (ON|OFF)[^\n]*/gi, "")
+    .replace(/Enable AI Analysis above[^\n]*/gi, "")
+    .replace(/Smart Study Assistant[^\n]*/gi, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
 
-    if (!resp.ok) throw new Error(`HTTP_${resp.status}`);
+  if (selectedText.length < 20) return;
 
-    const blob = await resp.blob();
-    if (blob.size === 0) throw new Error("empty_blob");
-
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "smart-study-output.pdf";
-    link.click();
-    URL.revokeObjectURL(url);
-
-  } catch (err) {
-    createPanel()
-      .querySelector("#ssa-pane-simplified").innerHTML = `
-        <div class="ssa-error-box" role="alert">
-          <span class="ssa-error-title">Export Failed</span>
-          Could not generate the PDF. Please try again.
-        </div>`;
-    switchTab("simplified");
-  } finally {
-    // Restore button text regardless of outcome
-    pdfBtn.disabled = false;
-    pdfBtn.innerHTML = `
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-           stroke="currentColor" stroke-width="2"
-           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-        <polyline points="7 10 12 15 17 10"/>
-        <line x1="12" y1="15" x2="12" y2="3"/>
-      </svg>
-      Export PDF`;
-  }
-}
-
-// ─── Message listener: icon click → toggle panel ──────────────────────────────
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg.action !== "toggle-panel") return;
-
-  const p = createPanel();
-  const isHidden = p.classList.contains("ssa-hidden");
-  p.classList.toggle("ssa-hidden", !isHidden);
-
-  if (isHidden) {
-    // Panel just became visible — sync state
-    syncToggleUI();
-  }
-
-  sendResponse({ ok: true });
-});
-
-// ─── Core: text selection listener ───────────────────────────────────────────
-// Edge Store note: using mouseup (not mousedown) is the correct pattern.
-// We check all guards before making any network call.
-document.addEventListener("mouseup", async (e) => {
-  // Guard 1: ignore clicks inside our own panel
-  if (e.target.closest?.("#ssa-panel")) return;
-
-  // Guard 2: do nothing if toggle is OFF — no network, no UI change
-  if (!isEnabled) return;
-
-  // Guard 3: prevent stacking concurrent requests
-  if (isAnalyzing) return;
-
-  const text = window.getSelection()?.toString().trim() ?? "";
-
-  // Guard 4: minimum meaningful selection
-  if (text.length < MIN_CHARS) return;
+  console.log("[SSA] ▶ Analyzing %d chars: %s…", selectedText.length, selectedText.slice(0, 60));
 
   isAnalyzing = true;
   showLoading();
 
   try {
-    const resp = await apiFetch("/analyze", {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ text }),
-    });
+    const resp = await fetchWithTimeout(
+      `${API_BASE}/analyze`,
+      {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ text: selectedText })
+      }
+    );
+
+    console.log("[SSA] /analyze → HTTP", resp.status);
 
     if (!resp.ok) {
-      showError("server");
+      const errBody = await resp.text().catch(() => "");
+      console.error("[SSA] Server error:", resp.status, errBody);
+      showError("unknown");
       return;
     }
 
     let result;
     try {
       result = await resp.json();
-    } catch {
+    } catch (parseErr) {
+      console.error("[SSA] JSON parse error:", parseErr);
       showError("parse");
       return;
     }
 
-    // Validate before touching the DOM — avoids partial renders
-    if (!isValidResult(result)) {
-      showError("parse");
-      return;
-    }
-
-    // Persist for PDF export and history detail view
-    chrome.storage.local.set({ analysis: result });
+    console.log("[SSA] ✓ Result keys:", Object.keys(result).join(", "));
+    chrome.storage.local.set({ analysis: result, currentText: selectedText });
     showResults(result);
 
   } catch (err) {
-    if (err.name === "AbortError") {
-      showError("timeout");
-    } else {
-      showError("network");
-    }
+    console.error("[SSA] Fetch error:", err.name, err.message);
+    showError("network");
   } finally {
     isAnalyzing = false;
+    console.log("[SSA] ■ Request complete");
   }
 });
 </file>
@@ -2159,25 +1956,17 @@ document.addEventListener("mouseup", async (e) => {
 {
   "manifest_version": 3,
   "name": "Smart Study Assistant",
-  "version": "3.1",
-  "description": "Select any text on a webpage to get an AI-powered simplified explanation, practice questions, keywords, and difficulty rating.",
+  "version": "2.0",
+  "description": "AI-powered study helper: simplify text, generate questions, extract keywords, detect difficulty. Toggle AI analysis on/off. Requires local backend.",
 
-  "permissions": [
-    "activeTab",
-    "scripting",
-    "storage"
-  ],
-
-  "host_permissions": [
-    "https://smart-study-assistant-api.onrender.com/*"
-  ],
+  "permissions": ["activeTab", "scripting", "storage"],
 
   "action": {
     "default_icon": {
       "48": "icon.png",
       "128": "icon.png"
     },
-    "default_title": "Smart Study Assistant"
+    "default_title": "Smart Study Assistant — Click to open panel"
   },
 
   "background": {
@@ -2186,10 +1975,14 @@ document.addEventListener("mouseup", async (e) => {
 
   "content_scripts": [
     {
-      "matches": ["https://*/*", "http://*/*"],
+      "matches": ["<all_urls>"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }
+  ],
+
+  "host_permissions": [
+    "http://127.0.0.1:8000/*"
   ],
 
   "icons": {
@@ -2197,11 +1990,7 @@ document.addEventListener("mouseup", async (e) => {
     "128": "icon.png"
   },
 
-  "minimum_chrome_version": "102",
-
-  "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'none';"
-  }
+  "minimum_chrome_version": "102"
 }
 </file>
 

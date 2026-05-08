@@ -1,76 +1,52 @@
 [
   {
-    "input": "The theory of relativity comprises two physics theories by Albert Einstein: special relativity and general relativity, proposed and published in 1905 and 1915, respectively.[1] Special relativity applies to all physical phenomena in the absence of gravity. General relativity explains the law of gravitation and its relation to the forces of nature.[2] It applies to the cosmological and astrophysical realm, including astronomy.[3]",
-    "simplified": "The theory of relativity comprises two physics theories by Albert Einstein: special relativity and general relativity. [1] Special relativity applies to all physical phenomena in the absence of gravity. The law of gravitation explains the law of gravity and its relation to the forces of nature. [2] It applies to the cosmological and astrophysical realm, including astronomy. [3]",
+    "input": "The rapid advancement of artificial intelligence has fundamentally transformed the contemporary technological landscape and redefined the manner in which individuals interact with digital systems. Artificial intelligence refers to the capability of machines and computational frameworks to simulate cognitive processes traditionally associated with human intelligence.",
+    "simplified": "Artificial intelligence refers to the capability of machines and computational frameworks to simulate cognitive processes traditionally associated with human intelligence.",
     "questions": [
-      "What two physics theories were proposed by Einstein?",
-      "What is special relativity?",
-      "What is the law of gravitation?",
-      "What are the cosmological and astrophysical realms?",
-      "How many points did the team score in the first half?"
+      "What has artificial intelligence fundamentally transformed the contemporary technological landscape?",
+      "What does artificial intelligence refer to?"
     ],
     "keywords": [
-      "absence",
-      "albert",
-      "astronomy.[3",
-      "einstein",
-      "forces",
-      "gravitation",
-      "gravity",
-      "law",
-      "nature.[2",
-      "phenomena",
-      "physics",
-      "realm",
-      "relation",
-      "relativity",
-      "respectively.[1",
-      "theories",
-      "theory"
+      "intelligence",
+      "advancement",
+      "capability",
+      "machines"
     ],
-    "difficulty": "Medium"
+    "difficulty": "Hard"
   },
   {
-    "input": "By comparison, general relativity did not appear to be as useful, beyond making minor corrections to predictions of Newtonian gravitation theory.[3] It seemed to offer little potential for experimental test, as most of its assertions were on an astronomical scale. Its mathematics seemed difficult and fully understandable only by a small number of people. Around 1960, general relativity became central to physics and astronomy. New mathematical techniques to apply to general relativity streamlined calculations and made its concepts more easily visualized. As astronomical phenomena were discovered, such as quasars (1963), the 3-kelvin microwave background radiation (1965), pulsars (1967), and the first black hole candidates (1981),[3] the theory explained their attributes, and measurement of them further confirmed the theory.",
-    "simplified": "A: General relativity did not appear to be as useful, beyond making minor corrections to predictions of Newtonian gravitation theory A student would need to be able to observe the astronomical scale of the object. Its mathematics seemed difficult and fully understandable only by a small number of people. General relativity is a theory of relativity based on the laws of physics. A student will learn how to calculate general relativity using new mathematical techniques. This text focuses on a number of astronomical phenomena.",
+    "input": "The rapid advancement of artificial intelligence has fundamentally transformed the contemporary technological landscape and redefined the manner in which individuals interact with digital systems. Artificial intelligence refers to the capability of machines and computational frameworks to simulate cognitive processes traditionally associated with human intelligence.",
+    "simplified": "Artificial intelligence refers to the capability of machines and computational frameworks to simulate cognitive processes traditionally associated with human intelligence.",
     "questions": [
-      "What is the difference between general relativity and Newtonian gravitation theory?",
-      "What is the name of the astronomical scale?",
-      "How many people did it seem difficult and fully understandable?",
-      "When did general relativity become central to physics?",
-      "What are the new mathematical techniques to apply to general relativity?"
+      "What has artificial intelligence fundamentally transformed the contemporary technological landscape?",
+      "What does artificial intelligence refer to?"
     ],
     "keywords": [
-      "assertions",
-      "astronomy",
-      "attributes",
-      "background",
-      "calculations",
-      "candidates",
-      "comparison",
-      "concepts",
-      "corrections",
-      "gravitation",
-      "hole",
-      "kelvin",
-      "mathematics",
-      "measurement",
-      "microwave",
-      "number",
-      "people",
-      "phenomena",
-      "physics",
-      "potential",
-      "predictions",
-      "pulsars",
-      "quasars",
-      "radiation",
-      "relativity",
-      "scale",
-      "techniques",
-      "test",
-      "theory",
-      "theory.[3"
+      "intelligence",
+      "advancement",
+      "capability",
+      "machines"
+    ],
+    "difficulty": "Hard"
+  },
+  {
+    "input": "The rapid advancement of artificial intelligence has fundamentally transformed the contemporary technological landscape and redefined the manner in which individuals interact with digital systems. Artificial intelligence refers to the capability of machines and computational frameworks to simulate cognitive processes traditionally associated with human intelligence. These processes include learning, reasoning, decision-making, language comprehension, and problem-solving. In recent years, AI technologies have become increasingly integrated into diverse sectors such as healthcare, finance, education, transportation, and scientific research.",
+    "simplified": "Artificial intelligence refers to the capability of machines and computational frameworks to simulate cognitive processes traditionally associated with human intelligence. These processes include learning, reasoning, decision-making, language comprehension, and problem-solving. AI technologies have become increasingly integrated into diverse sectors such as healthcare, finance, education, transportation, and scientific research.",
+    "questions": [
+      "What has artificial intelligence fundamentally transformed the contemporary technological landscape?",
+      "What does artificial intelligence refer to?",
+      "What are some of the processes involved in a child's development?",
+      "What are some of the areas that AI technologies have become increasingly integrated into?"
+    ],
+    "keywords": [
+      "intelligence",
+      "processes",
+      "advancement",
+      "capability",
+      "reasoning",
+      "making",
+      "technologies",
+      "sectors"
     ],
     "difficulty": "Medium"
   }
