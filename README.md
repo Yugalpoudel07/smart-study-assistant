@@ -23,7 +23,7 @@ The backend is already hosted. Just download and load the extension.
 
 ### Step 1 — Download
 
-Go to the [Releases](../../releases) page or grab **`extension.zip`** directly from this repo.
+Go to the [Releases](../../releases) page or grab **[extension.zip](https://github.com/Yugalpoudel07/smart-study-assistant/raw/main/extension.zip)** directly from this repo.
 
 ### Step 2 — Extract
 
