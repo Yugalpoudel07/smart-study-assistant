@@ -45,7 +45,7 @@
 pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("pdf.worker.js");
 
 // ── Shared constants ──────────────────────────────────────────────────────────
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = "https://smart-study-assistant-9u6m.onrender.com";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 1 — PANEL (mirrors content.js panel logic)
@@ -398,7 +398,7 @@ function showLoading() {
 function showError(type) {
   const p = createPanel();
   const msgs = {
-    network: { title: "Backend Offline", body: "Cannot reach <code>127.0.0.1:8000</code>.<br>Run: <code>uvicorn main:app --reload --host 127.0.0.1 --port 8000</code>" },
+    network: { title: "Backend Offline", body: "Cannot reach the backend. Check your API URL in the extension Options page." },
     parse:   { title: "Unexpected Response", body: "Server returned unreadable data." },
     unknown: { title: "Something Went Wrong", body: "An unexpected error occurred." },
   };
@@ -776,3 +776,6 @@ function showPdfError(msg) {
   div.textContent = msg;
   pdfContainer.appendChild(div);
 }
+</file>
+
+<file path="extension/pdf.js">

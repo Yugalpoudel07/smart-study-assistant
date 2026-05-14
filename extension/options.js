@@ -1,7 +1,7 @@
 // options.js — Settings page logic for Smart Study Assistant
 //
 // Reads and writes three settings to chrome.storage.sync:
-//   apiBase          (string)  — backend URL, default "http://127.0.0.1:8000"
+//   apiBase          (string)  — backend URL, default the hosted Render URL
 //   maxChars         (number)  — max chars to send, default 5000
 //   pdfRedirectEnabled (bool)  — whether to intercept PDF navigations, default true
 //
@@ -11,7 +11,7 @@
 "use strict";
 
 const DEFAULTS = {
-  apiBase:           "http://127.0.0.1:8000",
+  apiBase:           "https://smart-study-assistant-9u6m.onrender.com",
   maxChars:          5000,
   pdfRedirectEnabled: true,
 };

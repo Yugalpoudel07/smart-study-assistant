@@ -46,9 +46,9 @@ let lastAnalysisText  = null;      // for Retry button
 // ─── Boot: read persisted settings from chrome.storage ───────────────────────
 // FEATURE 6: read API_BASE and MAX_CHARS from options page settings
 chrome.storage.sync.get(
-  { apiBase: "http://127.0.0.1:8000", maxChars: 5000 },
+  { apiBase: "https://smart-study-assistant-9u6m.onrender.com", maxChars: 5000 },
   (settings) => {
-    API_BASE  = settings.apiBase  || "http://127.0.0.1:8000";
+    API_BASE  = settings.apiBase  || "https://smart-study-assistant-9u6m.onrender.com";
     MAX_CHARS = settings.maxChars || 5000;
     console.log("[SSA] Boot — API_BASE:", API_BASE, "MAX_CHARS:", MAX_CHARS);
   }
@@ -582,7 +582,7 @@ function showError(type) {
   const msgs = {
     network: {
       title: "Backend Offline",
-      body:  "Cannot reach <code>127.0.0.1:8000</code>.<br>Run: <code>uvicorn main:app --reload --host 127.0.0.1 --port 8000</code>"
+      body:  "Cannot reach the backend. Check your API URL in the extension Options page."
     },
     timeout: {
       title: "Request Timed Out",
