@@ -29,7 +29,7 @@ window.__SSA_INJECTED__ = true;
 "use strict";
 
 // ─── Constants (defaults overridden by options page via chrome.storage.sync) ──
-let API_BASE = "http://127.0.0.1:8000";
+let API_BASE = "https://smart-study-assistant-9u6m.onrender.com";
 let MAX_CHARS = 5000; // BUG 6: cap on text sent to backend
 
 // ─── Module state ────────────────────────────────────────────────────────────
