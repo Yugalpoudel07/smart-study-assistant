@@ -1,21 +1,29 @@
 """
 pdf_exporter.py — PDF generation for study analysis results using FPDF2.
+
+Changes vs original:
+  - BUG FIX (BUG 3 & 4): The `filename` parameter has been removed entirely.
+    The PDF is always written to a tempfile.NamedTemporaryFile in /tmp,
+    eliminating the path-traversal risk and keeping the CWD clean.
+    The caller receives the temp file path and is responsible for cleanup
+    (main.py uses BackgroundTasks to delete it after streaming).
 """
 
 import re
+import tempfile
 from fpdf import FPDF
 
 
-def export_to_pdf(data: dict, filename: str = "output.pdf") -> str:
+def export_to_pdf(data: dict) -> str:
     """
-    Generate a formatted PDF from analysis data.
+    Generate a formatted PDF from analysis data and write it to a temp file.
 
     Args:
         data: dict with keys: simplified, questions, keywords, difficulty
-        filename: output file path
 
     Returns:
-        The filename that was written.
+        The absolute path of the temporary PDF file in /tmp.
+        Caller is responsible for deleting it after use.
     """
     pdf = FPDF()
     pdf.add_page()
@@ -75,5 +83,12 @@ def export_to_pdf(data: dict, filename: str = "output.pdf") -> str:
     write_heading("Difficulty Level:")
     write_body(data.get("difficulty", ""))
 
-    pdf.output(filename)
-    return filename
+    # Write to a named temp file in /tmp; delete=False so the file persists
+    # long enough for StreamingResponse to read it.  main.py deletes it via
+    # BackgroundTasks once streaming is complete.
+    tmp = tempfile.NamedTemporaryFile(
+        suffix=".pdf", dir="/tmp", delete=False
+    )
+    tmp.close()  # close so FPDF can open it for writing on all platforms
+    pdf.output(tmp.name)
+    return tmp.name

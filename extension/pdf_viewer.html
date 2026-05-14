@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Study Assistant — PDF Viewer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #1a1a2e;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      color: #e8edf5;
+      min-height: 100vh;
+    }
+
+    /* ── Top toolbar ── */
+    #ssa-pdf-toolbar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 52px;
+      background: #0f1729;
+      border-bottom: 1px solid rgba(34,211,238,0.15);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 20px;
+      z-index: 999;
+      box-shadow: 0 2px 20px rgba(0,0,0,0.4);
+    }
+
+    #ssa-pdf-toolbar .logo {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #22d3ee;
+      letter-spacing: -0.3px;
+      margin-right: 8px;
+    }
+
+    #ssa-pdf-toolbar .sep {
+      width: 1px;
+      height: 24px;
+      background: rgba(255,255,255,0.1);
+    }
+
+    #ssa-pdf-toolbar label {
+      font-size: 11px;
+      color: #8b9bc0;
+    }
+
+    #ssa-pdf-toolbar input[type="number"] {
+      width: 56px;
+      padding: 4px 8px;
+      background: #1e293b;
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 6px;
+      color: #e8edf5;
+      font-size: 12px;
+      text-align: center;
+    }
+
+    #ssa-pdf-toolbar span#ssa-page-count {
+      font-size: 11px;
+      color: #5a6a8a;
+    }
+
+    .toolbar-btn {
+      padding: 6px 14px;
+      background: rgba(34,211,238,0.1);
+      border: 1px solid rgba(34,211,238,0.2);
+      border-radius: 8px;
+      color: #22d3ee;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      font-family: inherit;
+    }
+    .toolbar-btn:hover { background: rgba(34,211,238,0.2); }
+    .toolbar-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    #ssa-filename {
+      flex: 1;
+      font-size: 12px;
+      color: #5a6a8a;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    #ssa-hint {
+      font-size: 11px;
+      color: #4a5a7a;
+      white-space: nowrap;
+    }
+
+    /* ── PDF canvas area ── */
+    #ssa-pdf-container {
+      margin-top: 52px;
+      padding: 24px 0 40px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+    }
+
+    /*
+     * FIX: Removed overflow:hidden — it was clipping the text layer spans
+     * that PDF.js positions slightly outside the canvas bounds.
+     * position:relative is kept so the absolute textLayer is anchored here.
+     */
+    .ssa-pdf-page {
+      position: relative;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+      border-radius: 4px;
+      background: #fff;
+      /* overflow: hidden; ← REMOVED: was clipping text layer */
+    }
+
+    .ssa-pdf-page canvas {
+      display: block;
+    }
+
+    /*
+     * FIX: Text layer CSS rewritten for PDF.js v3 compatibility.
+     *
+     * PDF.js v3 renderTextLayer positions each span with absolute coords
+     * and applies transform:scale() to match the rendered font size.
+     * The layer must:
+     *   - be exactly the same size as the canvas (width/height set by JS)
+     *   - have pointer-events:auto so mouse events reach the spans
+     *   - NOT have overflow:hidden (clips transformed spans at edges)
+     *   - spans need user-select:text (without it, browser won't let you drag-select)
+     *
+     * The original CSS was missing user-select:text on spans, which is
+     * WHY the cursor appeared but dragging did nothing — the browser
+     * saw the element but treated its text as unselectable.
+     */
+    .textLayer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      /* NO overflow:hidden here */
+      line-height: 1;
+      pointer-events: auto;
+    }
+
+    /* Every span PDF.js injects into the text layer */
+    .textLayer span,
+    .textLayer br {
+      color: transparent;
+      position: absolute;
+      white-space: pre;
+      cursor: text;
+      transform-origin: 0% 0%;
+
+      /* FIX: This was missing. Without it the browser ignores drag-select. */
+      user-select: text;
+      -webkit-user-select: text;
+    }
+
+    /* Show a visible highlight when text is selected */
+    .textLayer ::selection {
+      background: rgba(34,211,238,0.4);
+      color: transparent;
+    }
+    .textLayer ::-moz-selection {
+      background: rgba(34,211,238,0.4);
+      color: transparent;
+    }
+
+    /* Loading state */
+    #ssa-loading {
+      margin-top: 120px;
+      text-align: center;
+      color: #22d3ee;
+      font-size: 14px;
+    }
+    #ssa-loading::after {
+      content: '';
+      display: block;
+      width: 32px; height: 32px;
+      border: 3px solid rgba(34,211,238,0.2);
+      border-top-color: #22d3ee;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 16px auto 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #ssa-error {
+      margin-top: 120px;
+      text-align: center;
+      color: #ef4444;
+      font-size: 14px;
+      padding: 0 40px;
+      line-height: 1.7;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ── Toolbar ── -->
+  <div id="ssa-pdf-toolbar">
+    <div class="logo">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
+        <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+      </svg>
+      Study Assistant
+    </div>
+
+    <div class="sep"></div>
+
+    <button class="toolbar-btn" id="ssa-prev" disabled>&#8592; Prev</button>
+    <label>Page</label>
+    <input type="number" id="ssa-page-input" value="1" min="1" />
+    <span id="ssa-page-count">of —</span>
+    <button class="toolbar-btn" id="ssa-next" disabled>Next &#8594;</button>
+
+    <div class="sep"></div>
+
+    <button class="toolbar-btn" id="ssa-zoom-out">&#8722; Zoom</button>
+    <button class="toolbar-btn" id="ssa-zoom-in">&#43; Zoom</button>
+
+    <div class="sep"></div>
+
+    <span id="ssa-filename">Loading PDF…</span>
+    <span id="ssa-hint">Select text to analyse ✦</span>
+  </div>
+
+  <!-- ── PDF render target ── -->
+  <div id="ssa-pdf-container">
+    <div id="ssa-loading">Loading PDF…</div>
+  </div>
+
+  <!-- PDF.js loaded from extension bundle -->
+  <script src="pdf.js"></script>
+  <script src="pdf_viewer.js"></script>
+</body>
+</html>

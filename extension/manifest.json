@@ -1,15 +1,34 @@
 {
   "manifest_version": 3,
   "name": "Smart Study Assistant",
-  "version": "2.0",
-  "description": "AI-powered study helper: simplify text, generate questions, extract keywords, detect difficulty. Toggle AI analysis on/off. Requires local backend.",
+  "version": "2.4",
+  "description": "AI-powered study helper: simplify text, generate questions, extract keywords, detect difficulty. Works on web pages AND PDFs. Requires local backend.",
 
-  "permissions": ["activeTab", "scripting", "storage"],
+  /*
+   * ICON NOTE (BUG 7): icon16.png, icon48.png, and icon128.png must be created
+   * manually by the developer before Chrome Web Store submission.
+   * Recommended tools: Figma, favicon.io, or any image editor.
+   * Required pixel dimensions:
+   *   icon16.png  → 16×16 px
+   *   icon48.png  → 48×48 px
+   *   icon128.png → 128×128 px
+   * These files are NOT auto-generated — they must be placed in the extension/
+   * folder at the correct resolutions.
+   */
+
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "webNavigation",
+    "webRequest"
+  ],
 
   "action": {
     "default_icon": {
-      "48": "icon.png",
-      "128": "icon.png"
+      "16":  "icon16.png",
+      "48":  "icon48.png",
+      "128": "icon128.png"
     },
     "default_title": "Smart Study Assistant — Click to open panel"
   },
@@ -22,18 +41,56 @@
     {
       "matches": ["<all_urls>"],
       "js": ["content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "pdf_viewer.html",
+        "pdf_viewer.js",
+        "pdf.js",
+        "pdf.worker.js",
+        "icon16.png",
+        "icon48.png",
+        "icon128.png"
+      ],
+      "matches": ["<all_urls>"]
     }
   ],
 
   "host_permissions": [
-    "http://127.0.0.1:8000/*"
+    "http://127.0.0.1:8000/*",
+    "<all_urls>"
   ],
 
   "icons": {
-    "48": "icon.png",
-    "128": "icon.png"
+    "16":  "icon16.png",
+    "48":  "icon48.png",
+    "128": "icon128.png"
   },
+
+  /* FEATURE 2: Keyboard shortcut — Alt+S toggles the panel.
+   * background.js listens for the "toggle-panel-shortcut" command
+   * and forwards a "toggle-panel" message to the active tab.
+   * The shortcut is documented in the status bar hint text in content.js. */
+  "commands": {
+    "toggle-panel-shortcut": {
+      "suggested_key": {
+        "default": "Alt+S",
+        "mac":     "Alt+S"
+      },
+      "description": "Toggle the Smart Study Assistant panel"
+    }
+  },
+
+  /* FEATURE 6: Options page for user-configurable settings. */
+  "options_page": "options.html",
+
+  /* BUG 7: Privacy policy URL placeholder — replace before store submission. */
+  "homepage_url": "https://your-privacy-policy-url-here.example.com",
 
   "minimum_chrome_version": "102"
 }
