@@ -7,22 +7,9 @@ pydantic==2.10.6
 python-multipart==0.0.6
 
 # =========================================================
-# HTTP client — used by question_generator.py (DeepInfra)
-# and any other service making outbound API calls.
+# HTTP client — used by outbound API calls (Groq, etc.)
 # =========================================================
 requests>=2.32.3
-
-# =========================================================
-# NLP / AI — local transformers pipeline is NOT needed.
-# question_generator.py uses DeepInfra's hosted flan-t5-base.
-# SAFE TO REMOVE sentencepiece / accelerate if simplifier.py
-# also migrates away from a local pipeline.
-# =========================================================
-# transformers==4.57.6   # not needed — inference is remote
-# torch==2.9.1           # not needed — inference is remote
-
-sentencepiece==0.2.0
-accelerate==1.10.1
 
 # =========================================================
 # spaCy + NLP Utilities
@@ -37,10 +24,9 @@ en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_
 # PDF Generation
 # =========================================================
 fpdf2==2.8.3
-reportlab==4.0.0
 
 # =========================================================
-# Groq API — text simplification inference (unchanged)
+# Groq API — text simplification + question generation
 # =========================================================
 groq>=0.9.0
 
@@ -53,7 +39,6 @@ python-dotenv>=1.0.0
 # Optional Performance Utilities
 # =========================================================
 protobuf>=4.25.3
-safetensors>=0.4.3
 numpy>=1.26.4
 
 # =========================================================

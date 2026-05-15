@@ -61,16 +61,15 @@ That's it. The extension icon appears in your toolbar. Click it on any webpage t
 | 🔍 **History Search** | Filter past analyses in real time — entirely client-side, no backend call needed |
 | 📄 **PDF Export** | Export any analysis as a formatted PDF report |
 | 📋 **Markdown Export** | Download analysis as a `.md` file — works offline, no backend call needed |
-| 📑 **Built-in PDF Viewer** | Automatically intercepts PDF links and opens them in a viewer with selectable text + analysis panel |
 | ⌨️ **Keyboard Shortcut** | `Alt+S` toggles the panel from anywhere on the page |
 | 🖱️ **Draggable Panel** | Floating, draggable, minimizable in-page panel — stays out of your way |
-| ⚙️ **Options Page** | Configure the API URL, character limit, and PDF redirect behaviour |
+| ⚙️ **Options Page** | Configure the API URL and character limit |
 
 ---
 
 ## 🎯 How to Use
 
-1. Navigate to any article, Wikipedia page, research paper, or PDF
+1. Navigate to any article, Wikipedia page, or research paper
 2. **Select any text** (between 20 and 5,000 characters)
 3. The **Smart Study Assistant panel** appears automatically with your results
 4. Switch between tabs:
@@ -93,11 +92,9 @@ smart-study-assistant/
 │
 ├── extension/                         ← Load this folder in Chrome/Edge
 │   ├── manifest.json                  # Manifest V3 — permissions, shortcuts, icons
-│   ├── background.js                  # Service worker: icon click, Alt+S, PDF intercept
+│   ├── background.js                  # Service worker: icon click, Alt+S
 │   ├── content.js                     # Floating panel + all in-page UI and analysis logic
 │   ├── options.html / options.js      # Extension settings page
-│   ├── pdf_viewer.html / pdf_viewer.js# Built-in PDF viewer with analysis panel
-│   ├── pdf.js / pdf.worker.js         # Mozilla PDF.js renderer
 │   └── icon16/48/128.png              # Extension icons
 │
 ├── backend/                           ← Hosted on Render (no local setup needed)
@@ -148,7 +145,6 @@ https://smart-study-assistant-9u6m.onrender.com
 | ⚡ **Backend Framework** | [FastAPI](https://fastapi.tiangolo.com) + Uvicorn |
 | 📄 **PDF Generation** | [FPDF2](https://pyfpdf.github.io/fpdf2/) — streamed with auto-cleanup |
 | 🌐 **Extension** | Chrome/Edge Manifest V3 — Vanilla JS, no frameworks |
-| 📑 **PDF Rendering** | [Mozilla PDF.js](https://mozilla.github.io/pdf.js/) |
 | ☁️ **Hosting** | [Render](https://render.com) free tier — Singapore region |
 
 ---
@@ -161,7 +157,6 @@ Right-click the extension icon → **Options** (or go to `edge://extensions` →
 |---|---|---|
 | **API Base URL** | Hosted Render URL | The backend URL. Only change this if you're running the backend locally. |
 | **Max chars to analyze** | `5000` | Text longer than this is trimmed before sending. A notice appears in the panel when trimming occurs. |
-| **Enable PDF auto-redirect** | On | When on, PDF links are intercepted and opened in the built-in viewer. Turn off if it conflicts with another PDF extension. |
 
 ---
 

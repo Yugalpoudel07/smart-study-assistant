@@ -8,8 +8,7 @@
     "activeTab",
     "scripting",
     "storage",
-    "webNavigation",
-    "webRequest"
+    "webNavigation"
   ],
 
   "action": {
@@ -37,10 +36,6 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "pdf_viewer.html",
-        "pdf_viewer.js",
-        "pdf.js",
-        "pdf.worker.js",
         "icon16.png",
         "icon48.png",
         "icon128.png"

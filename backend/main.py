@@ -24,7 +24,7 @@ TRAILING SLASH FIX (redirect_slashes=False):
     1. redirect_slashes=False here — a malformed URL gets 404 immediately
        instead of silently redirecting to the wrong endpoint.
     2. Guard in the DELETE handler rejects empty item_id with 400.
-    3. Frontend fix in pdf_viewer.js skips delete if itemId is empty.
+    3. Frontend fix in content.js skips delete if itemId is empty.
 """
 
 import os
@@ -49,7 +49,7 @@ from services.nlp_service import (
 # immediately rather than 307 → /history → 405.
 app = FastAPI(
     title="Smart Study Assistant API",
-    version="2.3",
+    version="2.4",
     redirect_slashes=False,
 )
 

@@ -1,39 +1,33 @@
 // options.js — Settings page logic for Smart Study Assistant
 //
-// Reads and writes three settings to chrome.storage.sync:
-//   apiBase          (string)  — backend URL, default the hosted Render URL
-//   maxChars         (number)  — max chars to send, default 5000
-//   pdfRedirectEnabled (bool)  — whether to intercept PDF navigations, default true
+// Reads and writes two settings to chrome.storage.sync:
+//   apiBase  (string) — backend URL, default the hosted Render URL
+//   maxChars (number) — max chars to send, default 5000
 //
 // content.js reads apiBase and maxChars on boot.
-// background.js reads pdfRedirectEnabled before intercepting PDF navigations.
 
 "use strict";
 
 const DEFAULTS = {
-  apiBase:           "https://smart-study-assistant-9u6m.onrender.com",
-  maxChars:          5000,
-  pdfRedirectEnabled: true,
+  apiBase:  "https://smart-study-assistant-9u6m.onrender.com",
+  maxChars: 5000,
 };
 
-const apiBaseInput   = document.getElementById("api-base");
-const maxCharsInput  = document.getElementById("max-chars");
-const pdfRedirectCb  = document.getElementById("pdf-redirect");
-const saveBtn        = document.getElementById("save-btn");
-const statusMsg      = document.getElementById("status-msg");
+const apiBaseInput  = document.getElementById("api-base");
+const maxCharsInput = document.getElementById("max-chars");
+const saveBtn       = document.getElementById("save-btn");
+const statusMsg     = document.getElementById("status-msg");
 
 // ── Load saved settings into the form on page open ───────────────────────────
 chrome.storage.sync.get(DEFAULTS, (settings) => {
-  apiBaseInput.value     = settings.apiBase;
-  maxCharsInput.value    = settings.maxChars;
-  pdfRedirectCb.checked  = settings.pdfRedirectEnabled;
+  apiBaseInput.value  = settings.apiBase;
+  maxCharsInput.value = settings.maxChars;
 });
 
 // ── Save on button click ──────────────────────────────────────────────────────
 saveBtn.addEventListener("click", () => {
   const apiBase  = apiBaseInput.value.trim() || DEFAULTS.apiBase;
   const maxChars = parseInt(maxCharsInput.value, 10) || DEFAULTS.maxChars;
-  const pdfRedirectEnabled = pdfRedirectCb.checked;
 
   // Basic URL validation
   try {
@@ -43,7 +37,7 @@ saveBtn.addEventListener("click", () => {
     return;
   }
 
-  chrome.storage.sync.set({ apiBase, maxChars, pdfRedirectEnabled }, () => {
+  chrome.storage.sync.set({ apiBase, maxChars }, () => {
     if (chrome.runtime.lastError) {
       showStatus("⚠ Could not save settings: " + chrome.runtime.lastError.message, false);
       return;
