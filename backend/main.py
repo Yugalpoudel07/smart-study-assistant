@@ -1,32 +1,3 @@
-"""
-main.py — FastAPI server for Smart Study Assistant.
-
-Endpoints:
-    POST   /analyze        → run all NLP tasks
-    GET    /history        → list all past analyses
-    DELETE /history/{id}   → remove one history entry by UUID string
-    POST   /export-pdf     → stream a PDF download
-
-CORS FIX: allow_origins=["*"] with allow_credentials=False is the correct
-  approach for a Chrome extension talking to localhost.
-
-TRAILING SLASH FIX (redirect_slashes=False):
-  FastAPI defaults to redirect_slashes=True, which means a request to
-  DELETE /history/ (with trailing slash) gets a 307 Temporary Redirect
-  to /history, which then returns 405 because DELETE /history is not a
-  defined route.
-
-  Root cause in the frontend: old history entries saved before the UUID
-  fix have no "id" field, so item.id is undefined → encodeURIComponent("")
-  → URL becomes /history/ (trailing slash) → 307 → 405.
-
-  Two-part fix:
-    1. redirect_slashes=False here — a malformed URL gets 404 immediately
-       instead of silently redirecting to the wrong endpoint.
-    2. Guard in the DELETE handler rejects empty item_id with 400.
-    3. Frontend fix in content.js skips delete if itemId is empty.
-"""
-
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -43,6 +14,12 @@ from services.nlp_service import (
     delete_history_item,
     export_to_pdf,
 )
+
+# Read once at startup so every request avoids repeated os.environ lookups.
+_HISTORY_DISABLED = os.environ.get("DISABLE_HISTORY", "").lower() in ("1", "true", "yes")
+
+if _HISTORY_DISABLED:
+    print("[main] DISABLE_HISTORY=true — /history routes will return empty/ok responses")
 
 # redirect_slashes=False: never silently redirect a malformed URL.
 # A DELETE /history/ (trailing slash, caused by empty UUID) now returns 404
@@ -85,6 +62,11 @@ def analyze(req: TextRequest):
 
 @app.get("/history")
 def history():
+    # DISABLE_HISTORY guard: history is now browser-side (content.js v3.3+).
+    # Old extension versions that still call GET /history get an empty list
+    # rather than an error, so they degrade gracefully.
+    if _HISTORY_DISABLED:
+        return []
     return get_history()
 
 
@@ -98,6 +80,12 @@ def delete_history(item_id: str):
             status_code=400,
             detail="item_id is required and must be a non-empty UUID string."
         )
+
+    # DISABLE_HISTORY guard: history is now browser-side (content.js v3.3+).
+    # Old extension versions that still call DELETE /history/{id} get a
+    # success response instead of a 404, so they don't show an error to users.
+    if _HISTORY_DISABLED:
+        return {"status": "deleted"}
 
     success = delete_history_item(item_id)
     if not success:

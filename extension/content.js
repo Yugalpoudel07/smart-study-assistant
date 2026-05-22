@@ -8,23 +8,15 @@
 if (typeof window.__SSA_INJECTED__ === 'undefined') {
 window.__SSA_INJECTED__ = true;
 
-// ===== Smart Study Assistant v3.2 =====
-// Changes vs v3.1:
-//   BUG FIX  (BUG 5)  : fetchWithTimeout renamed to fetchAPI with real
-//                        AbortController timeout of 120 s.  Shows a friendly
-//                        timeout message in the panel if it fires.
-//   BUG FIX  (BUG 6)  : MAX_CHARS = 5000 cap after the 20-char minimum.
-//                        Truncated text shows a one-line notice in the status bar.
-//   BUG FIX  (BUG 10) : History items use data-id (UUID) instead of data-index.
-//                        deleteHistoryItem() sends the entry's id field.
-//   FEATURE 1          : Offline/reconnect UX — error shown once per session;
-//                        "Retry" button re-attempts the last analysis.
-//   FEATURE 2          : Keyboard shortcut (Alt+S) — documented in status bar.
-//   FEATURE 3          : History search — client-side filter input above history list.
-//   FEATURE 4          : "Export MD" button — client-side Markdown download.
-//   FEATURE 5          : Status bar shows "Analyzed N chars · Difficulty · K keywords"
-//                        after a successful analysis.
-//   FEATURE 6          : API_BASE and MAX_CHARS read from chrome.storage.sync on boot.
+// ===== Smart Study Assistant v3.3 =====
+// Changes vs v3.2:
+//   HISTORY REWRITE : History now stored in chrome.storage.local (browser-side).
+//                     No longer depends on server history.json — works on
+//                     Render free tier (ephemeral filesystem) without DISABLE_HISTORY.
+//                     saveToLocalHistory() caps at 20 items, newest first.
+//                     loadHistory() reads chrome.storage.local, no fetch needed.
+//                     deleteHistoryItem() writes chrome.storage.local, no fetch needed.
+//                     renderHistoryList() filter now also matches keywords + difficulty.
 
 "use strict";
 
@@ -89,6 +81,20 @@ function escapeHtml(str) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+// ─── Local history helpers ────────────────────────────────────────────────────
+// Replaces server history.json — works on Render free tier with no disk writes.
+// Stores last 20 entries in chrome.storage.local, newest first.
+function saveToLocalHistory(entry) {
+  chrome.storage.local.get(["ssaHistory"], (result) => {
+    let history = result.ssaHistory || [];
+    if (!entry.id) entry.id = crypto.randomUUID();
+    entry.timestamp = Date.now();
+    history = [entry, ...history].slice(0, 20); // newest first, cap at 20
+    chrome.storage.local.set({ ssaHistory: history });
+    console.log("[SSA] History saved locally. Total items:", history.length);
+  });
 }
 
 // ─── Panel factory ───────────────────────────────────────────────────────────
@@ -659,38 +665,30 @@ function showResults(result) {
   switchToTab("simplified");
 }
 
-// ─── History ─────────────────────────────────────────────────────────────────
+// ─── History — reads/writes chrome.storage.local only, no server calls ────────
 async function loadHistory() {
   const p         = createPanel();
   const container = p.querySelector("#ssa-history");
 
-  // FEATURE 3: inject search input at the top of the history section
   container.innerHTML = `
     <input type="text" id="ssa-history-search" placeholder="Search history…" autocomplete="off">
     <div id="ssa-history-list"><div class="ssa-loading">Loading history</div></div>
   `;
 
-  // Wire up the search filter (client-side, no backend call)
   const searchInput = container.querySelector("#ssa-history-search");
   searchInput.addEventListener("input", () => {
     renderHistoryList(historyCache, searchInput.value);
   });
 
-  try {
-    const resp = await fetchAPI(`${API_BASE}/history`, {});
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const items = await resp.json();
-    historyCache = items;
-    renderHistoryList(items, "");
-
-  } catch (err) {
-    console.error("[SSA] loadHistory error:", err);
-    container.querySelector("#ssa-history-list").innerHTML =
-      '<div class="ssa-error"><strong>Backend Offline</strong>Start the server to view history.</div>';
-  }
+  // Read from local browser storage — no server call, works on Render free tier
+  chrome.storage.local.get(["ssaHistory"], (result) => {
+    historyCache = result.ssaHistory || [];
+    renderHistoryList(historyCache, "");
+  });
 }
 
-// FEATURE 3: render (filtered) history items into #ssa-history-list
+// Render (filtered) history items into #ssa-history-list.
+// Filter matches: input text, keywords array, and difficulty level.
 function renderHistoryList(items, filterText) {
   const p    = createPanel();
   const list = p.querySelector("#ssa-history-list");
@@ -698,7 +696,11 @@ function renderHistoryList(items, filterText) {
 
   const query = filterText.trim().toLowerCase();
   const filtered = query
-    ? items.filter(item => (item.input || item.text || "").toLowerCase().includes(query))
+    ? items.filter(item =>
+        (item.input || item.text || "").toLowerCase().includes(query) ||
+        (item.keywords || []).some(k => k.toLowerCase().includes(query)) ||
+        (item.difficulty || "").toLowerCase().includes(query)
+      )
     : items;
 
   if (!filtered.length) {
@@ -708,7 +710,6 @@ function renderHistoryList(items, filterText) {
     return;
   }
 
-  // BUG FIX (BUG 10): use data-id (UUID) instead of data-index
   list.innerHTML = filtered.map((item) => `
     <div class="ssa-history-item" data-id="${escapeHtml(item.id || "")}">
       <div class="ssa-history-item-content">
@@ -737,7 +738,6 @@ function renderHistoryList(items, filterText) {
     });
   });
 
-  // BUG FIX (BUG 10): pass the entry's UUID string, not its array position
   list.querySelectorAll(".ssa-history-delete").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -746,34 +746,20 @@ function renderHistoryList(items, filterText) {
   });
 }
 
-// BUG FIX (BUG 10): takes a UUID string, not an integer index.
-// EXTRA GUARD: skip the request if itemId is empty (old entries with no "id").
-async function deleteHistoryItem(itemId) {
+// Delete from chrome.storage.local — no server call needed.
+function deleteHistoryItem(itemId) {
   if (!itemId || !itemId.trim()) {
-    console.warn(
-      "[SSA] deleteHistoryItem: empty itemId — entry has no UUID. Refreshing history."
-    );
-
+    console.warn("[SSA] deleteHistoryItem: empty itemId. Refreshing history.");
     loadHistory();
     return;
   }
-
-  try {
-    const resp = await fetchAPI(
-      `${API_BASE}/history/${encodeURIComponent(itemId)}`,
-      { method: "DELETE" }
-    );
-
-    if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status}`);
-    }
-
-    loadHistory();
-
-  } catch (err) {
-    console.error("[SSA] Delete error:", err);
-    showInlineError("Could not delete — is the backend running?");
-  }
+  chrome.storage.local.get(["ssaHistory"], (result) => {
+    const history = (result.ssaHistory || []).filter(h => h.id !== itemId);
+    chrome.storage.local.set({ ssaHistory: history }, () => {
+      console.log("[SSA] History item deleted. Remaining:", history.length);
+      loadHistory();
+    });
+  });
 }
 
 function openHistoryDetail(item) {
@@ -862,6 +848,9 @@ async function runAnalysis(textToAnalyze) {
     console.log("[SSA] ✓ Result keys:", Object.keys(result).join(", "));
     chrome.storage.local.set({ analysis: result, currentText: textToAnalyze });
     showResults(result);
+
+    // Save to local browser history (20-item cap, no server needed)
+    saveToLocalHistory({ ...result, input: textToAnalyze });
 
     // FEATURE 5: update status bar with compact analysis summary
     const charCount = textToAnalyze.length.toLocaleString();
